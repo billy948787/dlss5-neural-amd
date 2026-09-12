@@ -1,0 +1,661 @@
+// D3D11-only x86 frontend. Guide/staging algorithms adapted from upstream neural.cpp.
+// See the upstream LICENSE; no engine or private runtime ABI lives in this translation unit.
+#include <imgui.h>
+#include <reshade.hpp>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <d3dcompiler.h>
+#include <wrl/client.h>
+#include <filesystem>
+#include <unordered_map>
+#include <mutex>
+#include <cstdio>
+#include <cstdarg>
+#include <algorithm>
+#include <string>
+#include "bridge_io.h"
+#include "control_state.h"
+#include <cstring>
+using Microsoft::WRL::ComPtr;
+using namespace reshade::api;
+namespace {
+FILE* logFile=nullptr;
+void Log(const char* fmt,...){if(!logFile)return;va_list a;va_start(a,fmt);vfprintf(logFile,fmt,a);va_end(a);fputc('\n',logFile);fflush(logFile);}
+std::filesystem::path Directory(){wchar_t b[32768]{};GetModuleFileNameW(nullptr,b,32768);return std::filesystem::path(b).parent_path();}
+bool DropRemote();
+struct Bridge {
+    const char* name="";ComPtr<ID3D11Texture2D> on11;x86bridge::Handle handle;
+    UINT width=0,height=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
+    void Destroy(){handle.reset();on11.Reset();width=height=0;format=DXGI_FORMAT_UNKNOWN;}
+    bool Ensure(ID3D11Device* dev,UINT w,UINT h,DXGI_FORMAT fmt,bool uav=false){
+        if(on11&&width==w&&height==h&&format==fmt)return true;
+        if(!DropRemote())return false;
+        Destroy();D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;
+        d.Format=fmt;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|(uav?D3D11_BIND_UNORDERED_ACCESS:0);
+        d.MiscFlags=D3D11_RESOURCE_MISC_SHARED_NTHANDLE|D3D11_RESOURCE_MISC_SHARED;
+        if(FAILED(dev->CreateTexture2D(&d,nullptr,&on11)))return false;
+        ComPtr<IDXGIResource1> res;HANDLE raw=nullptr;
+        if(FAILED(on11.As(&res))||FAILED(res->CreateSharedHandle(nullptr,DXGI_SHARED_RESOURCE_READ|DXGI_SHARED_RESOURCE_WRITE,nullptr,&raw))){Destroy();return false;}
+        handle.reset(raw);width=w;height=h;format=fmt;return true;
+    }
+};
+struct Guide
+{
+    const char *name = "";
+
+    ComPtr<ID3D11Resource> chosen;
+    UINT chosenBinds = 0;
+
+    ID3D11Resource *challenger = nullptr;
+    UINT challengerFrames = 0;
+    UINT width = 0, height = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+
+    ComPtr<ID3D11Texture2D> snap;  
+    UINT snapW = 0, snapH = 0;
+    DXGI_FORMAT snapFmt = DXGI_FORMAT_UNKNOWN;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    ID3D11Texture2D *srvOf = nullptr;
+    ComPtr<ID3D11UnorderedAccessView> uav;
+    ID3D11Texture2D *uavOf = nullptr;
+
+    Bridge bridge;
+  
+    bool ready = false;
+    bool logged = false;
+    bool failed = false;
+};
+
+constexpr char kGuideDepthCs[] = R"(
+Texture2D<float> src : register(t0);
+RWTexture2D<float> dst : register(u0);
+[numthreads(8,8,1)] void main(uint3 p : SV_DispatchThreadID) {
+ uint w, h; dst.GetDimensions(w, h);
+ if (p.x >= w || p.y >= h) return;
+ dst[p.xy] = src.Load(int3(p.xy, 0));
+})";
+
+DXGI_FORMAT GuideDepthSrvFormat(DXGI_FORMAT f)
+{
+    switch (f)
+    {
+    case DXGI_FORMAT_R32G8X24_TYPELESS:
+    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+        return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    case DXGI_FORMAT_R24G8_TYPELESS:
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    case DXGI_FORMAT_R32_TYPELESS:
+    case DXGI_FORMAT_D32_FLOAT:
+        return DXGI_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_R16_TYPELESS:
+    case DXGI_FORMAT_D16_UNORM:
+        return DXGI_FORMAT_R16_UNORM;
+    default:
+        return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+struct Tallied
+{
+    ComPtr<ID3D11Resource> res;
+    UINT binds = 0;
+    UINT width = 0, height = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+};
+std::unordered_map<void *, Tallied> g_depthTally, g_motionTally;
+
+void SettleGuide(Guide &guide, std::unordered_map<void *, Tallied> &tally)
+{
+    const Tallied *best = nullptr;
+    for (const auto &entry : tally)
+        if (best == nullptr || entry.second.binds > best->binds)
+            best = &entry.second;
+    if (best == nullptr)
+    {
+        tally.clear();
+        return;
+    }
+    if (guide.chosen.Get() == best->res.Get())
+    {
+        guide.chosenBinds = best->binds;
+        guide.challenger = nullptr;
+        guide.challengerFrames = 0;
+        tally.clear();
+        return;
+    }
+
+    if (guide.challenger != best->res.Get())
+    {
+        guide.challenger = best->res.Get();
+        guide.challengerFrames = 1;
+        tally.clear();
+        return;
+    }
+    if (++guide.challengerFrames < 3)
+    {
+        tally.clear();
+        return;
+    }
+    guide.challenger = nullptr;
+    guide.challengerFrames = 0;
+    guide.chosenBinds = best->binds;
+    guide.chosen = best->res;  
+    guide.width = best->width;
+    guide.height = best->height;
+    guide.format = best->format;
+    guide.ready = false;
+    guide.logged = false;
+    guide.failed = false;
+    Log("guide %s: taking %ux%u format %u, bound %u times a frame for three frames running",
+        guide.name, best->width, best->height, static_cast<unsigned>(best->format), best->binds);
+    tally.clear();
+}
+
+struct Front {
+    std::mutex lock;ComPtr<ID3D11Device> game11;ComPtr<ID3D11DeviceContext> game11ctx;
+    ComPtr<ID3D11Texture2D> stageIn11,stageOut11;UINT stageW=0,stageH=0,outWidth=0,outHeight=0;
+    DXGI_FORMAT stageFmt=DXGI_FORMAT_UNKNOWN;
+    Guide guideDepth,guideMotion;Bridge colour,output;
+    ComPtr<ID3D11ComputeShader> guideDepthCs;bool guideDepthCsFailed=false;
+    x86bridge::Handle process,pipe,job;DWORD hostPid=0;LUID luid{};
+    swapchain* active=nullptr;bool settings=false,enabled=false,failed=false,built=false,reset=true,hidden=false,keyDown=false,transport=false;
+    int toggleKey=VK_END,toggleMods=1;bool disableAltTab=false;uint64_t generation=0,frame=0;
+} g;
+struct Controls32 {
+    x86bridge::WireSettings shadow{};x86bridge::WireStatus status{};
+    bool synced=false,syncRequested=false,save=false,reload=false,factory=false,measure=false,capturing=false,preSyncEnableChanged=false;
+    uint64_t sentRevision=0,commandId=0,lastStatusAt=0,overlayAt=0;
+} controls;
+void OperationalSettings(){
+    const auto& s=controls.shadow;
+    if(g.toggleKey!=s.toggleKey||g.toggleMods!=s.toggleMods)g.keyDown=true;
+    if(g.enabled!=(s.enabled!=0)){g.reset=true;if(s.enabled)g.failed=false;}
+    g.enabled=s.enabled!=0;g.toggleKey=s.toggleKey;g.toggleMods=s.toggleMods;g.disableAltTab=s.disableOnAltTab!=0;
+}
+void OperationalChanged(){
+    if(controls.synced&&controls.shadow.enabled!=static_cast<uint32_t>(g.enabled)){
+        controls.shadow.enabled=g.enabled;++controls.shadow.settings_revision;
+    }
+}
+void StopHost(){
+    // A fatal partial operation is never followed by texture reuse in a new frame.
+    controls.synced=false;controls.status={};controls.save=controls.reload=controls.factory=controls.measure=controls.capturing=false;
+    g.pipe.reset();if(g.process&&WaitForSingleObject(g.process.value,0)!=WAIT_OBJECT_0){
+        TerminateProcess(g.process.value,7);WaitForSingleObject(g.process.value,INFINITE);
+    }
+    g.job.reset();g.process.reset();g.built=false;g.reset=true;
+}
+void Fault(const char* reason){Log("x86bridge ORIGINAL: %s (win32=%lu)",reason,GetLastError());g.failed=true;StopHost();}
+bool DropRemote(){
+    if(!g.built)return !g.failed;
+    x86bridge::Ack a;
+    if(!x86bridge::Request(g.pipe.value,g.process.value,x86bridge::Kind::Drop,nullptr,0,a)||a.result!=x86bridge::Result::Ready||a.generation!=g.generation){Fault("DROP failed");return false;}
+    g.built=false;g.reset=true;return true;
+}
+bool PrepareGuide(Guide &guide, bool isDepth)
+{
+    if (guide.failed || guide.chosen == nullptr || g.game11 == nullptr)
+        return false;
+    const UINT w = guide.width, h = guide.height;
+    if (w == 0 || h == 0)
+        return false;
+
+    if (!isDepth)
+    {
+        if (!guide.bridge.Ensure(g.game11.Get(), w, h, guide.format))
+        {
+            guide.failed = true;
+            Log("guide %s: format %u will not share between the devices; giving up on it.",
+                guide.name, static_cast<unsigned>(guide.format));
+            return false;
+        }
+        g.game11ctx->CopyResource(guide.bridge.on11.Get(), guide.chosen.Get());
+        guide.ready = true;
+        if (!guide.logged)
+        {
+            guide.logged = true;
+            Log("guide %s: %ux%u format %u crossing to the network device, one copy per frame.",
+                guide.name, w, h, static_cast<unsigned>(guide.format));
+        }
+        return true;
+    }
+
+    if (g.guideDepthCs == nullptr)
+    {
+        if (g.guideDepthCsFailed)
+            return false;
+        ComPtr<ID3DBlob> blob, err;
+        if (FAILED(D3DCompile(kGuideDepthCs, sizeof(kGuideDepthCs) - 1, "guide-depth", nullptr,
+                              nullptr, "main", "cs_5_0", 0, 0, &blob, &err)) ||
+            FAILED(g.game11->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(),
+                                                 nullptr, &g.guideDepthCs)))
+        {
+            g.guideDepthCsFailed = true;
+            Log("guide depth: compute shader failed: %s",
+                err != nullptr ? static_cast<const char *>(err->GetBufferPointer()) : "?");
+            return false;
+        }
+    }
+
+    if (guide.snap == nullptr || guide.snapW != w || guide.snapH != h || guide.snapFmt != guide.format)
+    {
+        guide.srv.Reset();
+        guide.srvOf = nullptr;
+        guide.snap.Reset();
+        D3D11_TEXTURE2D_DESC td {};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = guide.format;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(g.game11->CreateTexture2D(&td, nullptr, &guide.snap)))
+        {
+            guide.failed = true;
+            Log("guide depth: private %ux%u copy of format %u could not be created.", w, h,
+                static_cast<unsigned>(guide.format));
+            return false;
+        }
+        guide.snapW = w;
+        guide.snapH = h;
+        guide.snapFmt = guide.format;
+    }
+    g.game11ctx->CopyResource(guide.snap.Get(), guide.chosen.Get());
+
+    if (!guide.bridge.Ensure(g.game11.Get(), w, h, DXGI_FORMAT_R32_FLOAT, true))
+    {
+        guide.failed = true;
+        return false;
+    }
+
+    if (guide.uavOf != guide.bridge.on11.Get())
+    {
+        guide.uav.Reset();
+        guide.uavOf = nullptr;
+    }
+    if (guide.uav == nullptr)
+    {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud {};
+        ud.Format = DXGI_FORMAT_R32_FLOAT;
+        ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+        if (FAILED(g.game11->CreateUnorderedAccessView(guide.bridge.on11.Get(), &ud, &guide.uav)))
+        {
+            guide.failed = true;
+            Log("guide depth: UAV over the shared texture failed.");
+            return false;
+        }
+        guide.uavOf = guide.bridge.on11.Get();
+    }
+    if (guide.srvOf != guide.snap.Get())
+    {
+        guide.srv.Reset();
+        guide.srvOf = nullptr;
+    }
+    if (guide.srv == nullptr)
+    {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd {};
+        sd.Format = GuideDepthSrvFormat(guide.format);
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = 1;
+        if (FAILED(g.game11->CreateShaderResourceView(guide.snap.Get(), &sd, &guide.srv)))
+        {
+            guide.failed = true;
+            Log("guide depth: SRV over the snapshot failed (fmt %u read as %u).",
+                static_cast<unsigned>(guide.format), static_cast<unsigned>(sd.Format));
+            return false;
+        }
+        guide.srvOf = guide.snap.Get();
+    }
+
+    ID3D11ComputeShader *oldCs = nullptr;
+    ID3D11ShaderResourceView *oldSrv = nullptr;
+    ID3D11UnorderedAccessView *oldUav = nullptr;
+    g.game11ctx->CSGetShader(&oldCs, nullptr, nullptr);
+    g.game11ctx->CSGetShaderResources(0, 1, &oldSrv);
+    g.game11ctx->CSGetUnorderedAccessViews(0, 1, &oldUav);
+
+    UINT keep = static_cast<UINT>(-1);
+    ID3D11ShaderResourceView *srv = guide.srv.Get();
+    ID3D11UnorderedAccessView *uav = guide.uav.Get();
+    g.game11ctx->CSSetShader(g.guideDepthCs.Get(), nullptr, 0);
+    g.game11ctx->CSSetShaderResources(0, 1, &srv);
+    g.game11ctx->CSSetUnorderedAccessViews(0, 1, &uav, &keep);
+    g.game11ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+
+    ID3D11ShaderResourceView *nullSrv = nullptr;
+    ID3D11UnorderedAccessView *nullUav = nullptr;
+    g.game11ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, &keep);
+    g.game11ctx->CSSetShaderResources(0, 1, &nullSrv);
+    g.game11ctx->CSSetShader(oldCs, nullptr, 0);
+    g.game11ctx->CSSetShaderResources(0, 1, &oldSrv);
+    g.game11ctx->CSSetUnorderedAccessViews(0, 1, &oldUav, &keep);
+    if (oldCs != nullptr)
+        oldCs->Release();
+    if (oldSrv != nullptr)
+        oldSrv->Release();
+    if (oldUav != nullptr)
+        oldUav->Release();
+
+    guide.ready = true;
+    if (!guide.logged)
+    {
+        guide.logged = true;
+        Log("guide depth: %ux%u format %u -> shared R32_FLOAT, one snapshot and one dispatch per "
+            "frame.",
+            w, h, static_cast<unsigned>(guide.format));
+    }
+    return true;
+}
+
+bool EnsureStage(UINT w, UINT h, DXGI_FORMAT fmt)
+{
+    if (g.stageIn11 != nullptr && g.stageW == w && g.stageH == h && g.stageFmt == fmt)
+        return true;
+    g.stageIn11.Reset();
+    g.stageOut11.Reset();
+    g.stageW = g.stageH = 0;
+    D3D11_TEXTURE2D_DESC td {};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = fmt;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(g.game11->CreateTexture2D(&td, nullptr, &g.stageIn11)) ||
+        FAILED(g.game11->CreateTexture2D(&td, nullptr, &g.stageOut11)))
+    {
+        Log("bridge: could not create the private staging textures %ux%u fmt %u.", w, h,
+            static_cast<unsigned>(fmt));
+        g.stageIn11.Reset();
+        g.stageOut11.Reset();
+        return false;
+    }
+    g.stageW = w;
+    g.stageH = h;
+    g.stageFmt = fmt;
+    Log("bridge: private staging %ux%u fmt %u, so the back buffer never meets a shared resource.",
+        w, h, static_cast<unsigned>(fmt));
+    return true;
+}
+
+bool LooksLikeMotion(const D3D11_TEXTURE2D_DESC &d, UINT screenW, UINT screenH)
+{
+    if (d.SampleDesc.Count != 1 || d.ArraySize != 1)
+        return false;
+    if (d.Format != DXGI_FORMAT_R16G16_FLOAT && d.Format != DXGI_FORMAT_R32G32_FLOAT &&
+        d.Format != DXGI_FORMAT_R16G16_SNORM)
+        return false;
+    return screenW == 0 || (d.Width * 2 >= screenW && d.Height * 2 >= screenH);
+}
+
+void ObserveD3D11(device *dev, const resource_view *rtvs, uint32_t count, resource depthRes)
+{
+    const UINT screenW = g.outWidth, screenH = g.outHeight;
+    auto record = [](std::unordered_map<void *, Tallied> &tally, ID3D11Resource *native,
+                     const D3D11_TEXTURE2D_DESC &d) {
+        Tallied &slot = tally[native];
+        if (slot.res == nullptr)
+        {
+            slot.res = native;
+            slot.width = d.Width;
+            slot.height = d.Height;
+            slot.format = d.Format;
+        }
+        ++slot.binds;
+    };
+    if (depthRes.handle != 0)
+    {
+        auto *native = reinterpret_cast<ID3D11Resource *>(depthRes.handle);
+        ComPtr<ID3D11Texture2D> tex;
+        D3D11_TEXTURE2D_DESC d {};
+        if (SUCCEEDED(native->QueryInterface(IID_PPV_ARGS(&tex))))
+        {
+            tex->GetDesc(&d);
+            if (d.SampleDesc.Count == 1 && d.ArraySize == 1 &&
+                GuideDepthSrvFormat(d.Format) != DXGI_FORMAT_UNKNOWN &&
+                (screenW == 0 || (d.Width * 2 >= screenW && d.Height * 2 >= screenH)))
+                record(g_depthTally, native, d);
+        }
+    }
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        if (rtvs[i].handle == 0)
+            continue;
+        const resource res = dev->get_resource_from_view(rtvs[i]);
+        if (res.handle == 0)
+            continue;
+        auto *native = reinterpret_cast<ID3D11Resource *>(res.handle);
+        ComPtr<ID3D11Texture2D> tex;
+        D3D11_TEXTURE2D_DESC d {};
+        if (FAILED(native->QueryInterface(IID_PPV_ARGS(&tex))))
+            continue;
+        tex->GetDesc(&d);
+        if (LooksLikeMotion(d, screenW, screenH))
+            record(g_motionTally, native, d);
+    }
+}
+
+bool FlushAndWait11(){
+    if(!g.game11||!g.game11ctx)return false;
+    D3D11_QUERY_DESC d{};d.Query=D3D11_QUERY_EVENT;ComPtr<ID3D11Query> q;
+    if(FAILED(g.game11->CreateQuery(&d,&q)))return false;
+    g.game11ctx->End(q.Get());g.game11ctx->Flush();
+    const ULONGLONG end=GetTickCount64()+2000;
+    HRESULT hr;
+    while((hr=g.game11ctx->GetData(q.Get(),nullptr,0,0))==S_FALSE){
+        if(FAILED(g.game11->GetDeviceRemovedReason())||GetTickCount64()>end)return false;
+        Sleep(0);
+    }
+    return SUCCEEDED(hr)&&SUCCEEDED(g.game11->GetDeviceRemovedReason());
+}
+void Settings(){
+    if(g.settings)return;g.settings=true;
+    const auto dir=Directory();logFile=_wfopen((dir/L"dlss5-neural-x86.log").c_str(),L"w");
+    const auto ini=(dir/L"dlss5-neural.ini").wstring();
+    g.enabled=GetPrivateProfileIntW(L"dlss5",L"StartOn",0,ini.c_str())!=0;
+    g.toggleKey=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"dlss5",L"ToggleKey",VK_END,ini.c_str())),0,255);
+    g.toggleMods=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"dlss5",L"ToggleMods",1,ini.c_str())),0,7);
+    g.disableAltTab=GetPrivateProfileIntW(L"dlss5",L"DisableOnAltTab",0,ini.c_str())!=0;
+    wchar_t flag[8]{};g.transport=GetEnvironmentVariableW(L"DLSS5_X86BRIDGE_TRANSPORT_ONLY",flag,8)==1&&flag[0]==L'1';
+    Log("x86bridge D3D11 x86 protocol=%u mode=%s StartOn=%d ToggleKey=%d ToggleMods=%d",x86bridge::Version,g.transport?"TRANSPORT_ONLY":"NEURAL",g.enabled,g.toggleKey,g.toggleMods);
+}
+bool StartHost(){
+    if(g.process)return WaitForSingleObject(g.process.value,0)==WAIT_TIMEOUT;
+    const auto dir=Directory(),exe=dir/L"dlss5-neural-host64.exe";
+    if(GetFileAttributesW(exe.c_str())==INVALID_FILE_ATTRIBUTES)return false;
+    LARGE_INTEGER ticks{};QueryPerformanceCounter(&ticks);
+    const std::wstring name=L"\\\\.\\pipe\\dlss5-x86bridge-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(ticks.QuadPart);
+    g.pipe.reset(CreateNamedPipeW(name.c_str(),PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED|FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,4096,4096,0,nullptr));
+    if(!g.pipe)return false;
+    x86bridge::Handle event(CreateEventW(nullptr,TRUE,FALSE,nullptr));if(!event)return false;
+    OVERLAPPED ov{};ov.hEvent=event.value;
+    const BOOL connected=ConnectNamedPipe(g.pipe.value,&ov);const DWORD connectionError=connected?ERROR_SUCCESS:GetLastError();
+    if(!connected&&connectionError!=ERROR_IO_PENDING&&connectionError!=ERROR_PIPE_CONNECTED)return false;
+    const bool pending=!connected&&connectionError==ERROR_IO_PENDING;
+    auto cancel=[&](){if(pending){DWORD n=0;CancelIoEx(g.pipe.value,&ov);GetOverlappedResult(g.pipe.value,&ov,&n,TRUE);}};
+    g.job.reset(CreateJobObjectW(nullptr,nullptr));JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if(!g.job||!SetInformationJobObject(g.job.value,JobObjectExtendedLimitInformation,&limits,sizeof(limits))){cancel();return false;}
+    std::wstring command=L"\""+exe.wstring()+L"\" \""+name+L"\" "+std::to_wstring(GetCurrentProcessId())+(g.transport?L" --transport-only":L"");
+    STARTUPINFOW si{sizeof(si)};PROCESS_INFORMATION pi{};
+    if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW|CREATE_SUSPENDED,nullptr,dir.c_str(),&si,&pi)){cancel();return false;}
+    g.process.reset(pi.hProcess);g.hostPid=pi.dwProcessId;x86bridge::Handle thread(pi.hThread);
+    if(!AssignProcessToJobObject(g.job.value,g.process.value)||ResumeThread(thread.value)==DWORD(-1)){cancel();return false;}
+    if(pending){
+        HANDLE waits[]={event.value,g.process.value};DWORD n=0;
+        if(WaitForMultipleObjects(2,waits,FALSE,INFINITE)!=WAIT_OBJECT_0){cancel();return false;}
+        if(!GetOverlappedResult(g.pipe.value,&ov,&n,FALSE))return false;
+    }
+    ULONG client=0;if(!GetNamedPipeClientProcessId(g.pipe.value,&client)||client!=g.hostPid)return false;
+    x86bridge::Hello h;h.pid=GetCurrentProcessId();h.luidLow=g.luid.LowPart;h.luidHigh=g.luid.HighPart;
+    x86bridge::Ack a;
+    const bool ok=x86bridge::Request(g.pipe.value,g.process.value,x86bridge::Kind::Hello,&h,sizeof(h),a)&&a.result==x86bridge::Result::Ready&&a.luidLow==h.luidLow&&a.luidHigh==h.luidHigh;
+    Log("x86bridge HELLO host_pid=%lu LUID=%08lX:%08lX %s",g.hostPid,g.luid.HighPart,g.luid.LowPart,ok?"MATCH":"FAILED");
+    return ok;
+}
+bool Export(Bridge& source,x86bridge::Texture& t){
+    if(!source.on11)return true;HANDLE remote=nullptr;
+    if(!DuplicateHandle(GetCurrentProcess(),source.handle.value,g.process.value,&remote,0,FALSE,DUPLICATE_SAME_ACCESS))return false;
+    t.valid=1;t.width=source.width;t.height=source.height;t.format=source.format;
+    t.handle=static_cast<uint64_t>(reinterpret_cast<uintptr_t>(remote));return true;
+}
+bool BuildRemote(){
+    if(g.built)return true;
+    x86bridge::Build b;b.generation=++g.generation;
+    if(!Export(g.colour,b.colour)||!Export(g.output,b.output)||!Export(g.guideDepth.bridge,b.depth)||!Export(g.guideMotion.bridge,b.motion))return false;
+    x86bridge::Ack a;
+    if(!x86bridge::Request(g.pipe.value,g.process.value,x86bridge::Kind::Build,&b,sizeof(b),a)||a.result!=x86bridge::Result::Ready||a.generation!=b.generation)return false;
+    g.built=true;g.reset=true;return true;
+}
+bool StateRequest(x86bridge::Kind kind,const void* body=nullptr,uint32_t bytes=0,bool replace=false){
+    x86bridge::Ack ack;x86bridge::StateSnapshot snapshot;
+    if(!x86bridge::Request(g.pipe.value,g.process.value,kind,body,bytes,ack)||
+       !x86bridge::Receive(g.pipe.value,g.process.value,&snapshot,sizeof(snapshot)))return false;
+    if(ack.result!=x86bridge::Result::Ready)return false;
+    controls.status=snapshot.status;
+    if(replace){controls.shadow=snapshot.settings;controls.sentRevision=snapshot.settings.settings_revision;controls.synced=true;OperationalSettings();}
+    return true;
+}
+// Called only from OnPresent, with g.lock held. Never from ImGui or a worker.
+bool SyncControls(){
+    using x86bridge::Kind;
+    if(!controls.synced){
+        // Preserve an explicit pre-sync enable/hotkey action; all persistent values still come from host.
+        const bool requestedEnable=g.enabled;
+        if(!StateRequest(Kind::GetState,nullptr,0,true))return false;
+        if(controls.preSyncEnableChanged&&requestedEnable!=g.enabled){g.enabled=requestedEnable;g.reset=true;OperationalChanged();}
+        controls.syncRequested=false;controls.preSyncEnableChanged=false;
+    }
+    if(controls.shadow.settings_revision!=controls.sentRevision){
+        if(!StateRequest(Kind::SetState,&controls.shadow,sizeof(controls.shadow),true))return false;
+    }
+    if(controls.save){if(!StateRequest(Kind::SaveSettings))return false;controls.save=false;}
+    if(controls.reload){if(!StateRequest(Kind::ReloadSettings,nullptr,0,true))return false;controls.reload=false;}
+    if(controls.factory){x86bridge::WireCommand c;c.id=++controls.commandId;c.code=x86bridge::CommandCode::FactoryDefaults;
+        if(!StateRequest(Kind::Command,&c,sizeof(c),true))return false;controls.factory=false;}
+    if(controls.measure){x86bridge::WireCommand c;c.id=++controls.commandId;
+        if(!StateRequest(Kind::Command,&c,sizeof(c)))return false;controls.measure=false;}
+    const uint64_t now=GetTickCount64();
+    if(now-controls.lastStatusAt>=250){if(!StateRequest(Kind::Status))return false;controls.lastStatusAt=now;}
+    return true;
+}
+#include "overlay32.inc"
+void ClearGuide(Guide& v){
+    v.chosen.Reset();v.snap.Reset();v.srv.Reset();v.uav.Reset();v.bridge.Destroy();
+    v.challenger=nullptr;v.challengerFrames=0;v.chosenBinds=0;v.width=v.height=v.snapW=v.snapH=0;
+    v.srvOf=nullptr;v.uavOf=nullptr;v.snapFmt=v.format=DXGI_FORMAT_UNKNOWN;v.ready=v.failed=v.logged=false;
+}
+void ReleaseLocal(){
+    g_depthTally.clear();g_motionTally.clear();ClearGuide(g.guideDepth);ClearGuide(g.guideMotion);
+    g.colour.Destroy();g.output.Destroy();g.stageIn11.Reset();g.stageOut11.Reset();g.stageW=g.stageH=0;
+    g.stageFmt=DXGI_FORMAT_UNKNOWN;g.reset=true;
+}
+void OnBind(command_list* cmd,uint32_t count,const resource_view* targets,resource_view depth){
+    if(!cmd)return;auto* dev=cmd->get_device();if(!dev||dev->get_api()!=device_api::d3d11)return;
+    std::lock_guard lock(g.lock);
+    if(!g.game11||reinterpret_cast<ID3D11Device*>(dev->get_native())!=g.game11.Get())return;
+    const auto resource=depth.handle?dev->get_resource_from_view(depth):reshade::api::resource{0};
+    ObserveD3D11(dev,targets,count,resource);
+}
+bool OnDraw(command_list*,uint32_t,uint32_t,uint32_t,uint32_t){return false;}
+bool OnDrawIndexed(command_list*,uint32_t,uint32_t,uint32_t,int32_t,uint32_t){return false;}
+void OnInit(swapchain* sc,bool){
+    if(!sc||sc->get_device()->get_api()!=device_api::d3d11)return;
+    std::lock_guard lock(g.lock);if(g.active==sc)g.reset=true;
+}
+void OnDestroy(swapchain* sc,bool resize){
+    std::lock_guard lock(g.lock);if(sc!=g.active)return;
+    DropRemote();
+    if(g.game11ctx){FlushAndWait11();g.game11ctx->ClearState();g.game11ctx->Flush();}
+    ReleaseLocal();
+    if(!resize){
+        if(g.process&&!g.failed){x86bridge::Ack a;x86bridge::Request(g.pipe.value,g.process.value,x86bridge::Kind::Quit,nullptr,0,a);}
+        StopHost();g.active=nullptr;g.game11ctx.Reset();g.game11.Reset();g.guideDepthCs.Reset();g.guideDepthCsFailed=false;
+    }
+}
+void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,const rect*){
+    if(!sc||sc->get_device()->get_api()!=device_api::d3d11)return;
+    std::lock_guard lock(g.lock);Settings();
+    struct ClearFrameTallies {~ClearFrameTallies(){g_depthTally.clear();g_motionTally.clear();}} clearFrameTallies;
+    if(g.active&&g.active!=sc)return; // one active swapchain per process, never mix resource owners
+    if(!g.active){g.active=sc;g.reset=true;}
+    HWND hwnd=static_cast<HWND>(sc->get_hwnd());
+    const bool foreground=!hwnd||GetForegroundWindow()==hwnd;
+    const int mods=((GetAsyncKeyState(VK_CONTROL)&0x8000)?1:0)|((GetAsyncKeyState(VK_MENU)&0x8000)?2:0)|((GetAsyncKeyState(VK_SHIFT)&0x8000)?4:0);
+    if(controls.capturing&&GetTickCount64()-controls.overlayAt>500)controls.capturing=false;
+    const bool key=!controls.capturing&&foreground&&g.toggleKey!=0&&(GetAsyncKeyState(g.toggleKey)&0x8000)&&(mods&g.toggleMods)==g.toggleMods;
+    if(key&&!g.keyDown){if(!controls.synced)controls.preSyncEnableChanged=true;g.enabled=!g.enabled;g.reset=true;if(g.enabled)g.failed=false;Log("x86bridge enabled=%d",g.enabled);}
+    g.keyDown=key;
+    if(g.disableAltTab&&!foreground){if(!controls.synced&&g.enabled)controls.preSyncEnableChanged=true;g.enabled=false;g.reset=true;}
+    OperationalChanged();
+    if(hwnd&&IsIconic(hwnd)){g.hidden=true;g.reset=true;g_depthTally.clear();g_motionTally.clear();return;}
+    if(g.hidden){g.hidden=false;g.reset=true;}
+    if((!g.enabled&&!controls.syncRequested&&!controls.synced)||g.failed){g.reset=true;g_depthTally.clear();g_motionTally.clear();return;}
+    auto* dev=sc->get_device();
+    if(!g.game11){
+        g.game11=reinterpret_cast<ID3D11Device*>(dev->get_native());
+        if(!g.game11){Fault("D3D11 device absent");return;}g.game11->GetImmediateContext(&g.game11ctx);
+        ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC d{};
+        if(!g.game11ctx||FAILED(g.game11.As(&dxgi))||FAILED(dxgi->GetAdapter(&adapter))||FAILED(adapter->GetDesc(&d))){Fault("adapter unavailable");return;}
+        g.luid=d.AdapterLuid;g.guideDepth.name="depth";g.guideMotion.name="motion";
+    }
+    if(!StartHost()){Fault("helper missing, launch failed, or host died");return;}
+    if(!SyncControls()){Fault("control protocol v2 synchronization failed");return;}
+    if(!g.enabled){g.reset=true;return;}
+    const auto back=sc->get_current_back_buffer();if(!back.handle){g.reset=true;return;}
+    ComPtr<ID3D11Texture2D> bb;
+    if(FAILED(reinterpret_cast<ID3D11Resource*>(back.handle)->QueryInterface(IID_PPV_ARGS(&bb)))){Fault("backbuffer texture unavailable");return;}
+    D3D11_TEXTURE2D_DESC d{};bb->GetDesc(&d);
+    if(!d.Width||!d.Height||d.SampleDesc.Count!=1||d.ArraySize!=1||d.MipLevels!=1){g.reset=true;return;}
+    g.outWidth=d.Width;g.outHeight=d.Height;
+    if(!g.colour.Ensure(g.game11.Get(),d.Width,d.Height,d.Format)||!g.output.Ensure(g.game11.Get(),d.Width,d.Height,d.Format)||!EnsureStage(d.Width,d.Height,d.Format)){Fault("colour/staging resources unavailable");return;}
+    g.game11ctx->CopyResource(g.stageIn11.Get(),bb.Get());g.game11ctx->CopyResource(g.colour.on11.Get(),g.stageIn11.Get());
+    SettleGuide(g.guideDepth,g_depthTally);SettleGuide(g.guideMotion,g_motionTally);
+    g.guideDepth.ready=g.guideMotion.ready=false;
+    PrepareGuide(g.guideDepth,true);PrepareGuide(g.guideMotion,false);
+    if(g.failed)return;
+    if(!FlushAndWait11()){Fault("input D3D11 queue not drained");return;}
+    if(!BuildRemote()){Fault("resource export/BUILD failed");return;}
+    x86bridge::Frame f;f.generation=g.generation;f.id=++g.frame;f.resetHistory=g.reset;
+    f.depthValid=g.guideDepth.ready;f.motionValid=g.guideMotion.ready;
+    x86bridge::Ack a;
+    if(!x86bridge::Request(g.pipe.value,g.process.value,x86bridge::Kind::Frame,&f,sizeof(f),a)||a.generation!=f.generation||a.frame!=f.id){Fault("frame reply failed/mismatched");return;}
+    g.reset=false;
+    if(a.result==x86bridge::Result::Error){Fault("host error");return;}
+    if(x86bridge::Confirmed(a,f,g.transport)){
+        if(FAILED(g.game11->GetDeviceRemovedReason())){Fault("D3D11 device removed");return;}
+        g.game11ctx->CopyResource(g.stageOut11.Get(),g.output.on11.Get());
+        g.game11ctx->CopyResource(bb.Get(),g.stageOut11.Get());
+        if(!FlushAndWait11()){Fault("return D3D11 queue not drained");return;}
+        g.game11ctx->Flush();
+    }else if(a.result!=x86bridge::Result::Original){Fault("unexpected presentation status");return;}
+    if(g.frame<=3||g.frame%120==0)Log("x86bridge frame=%llu result=%u same_frame=1 depth=%u motion=%u",f.id,static_cast<unsigned>(a.result),f.depthValid,f.motionValid);
+}
+}
+extern "C" __declspec(dllexport) const char* NAME="dlss5 neural x86 bridge";
+extern "C" __declspec(dllexport) const char* DESCRIPTION="Generic D3D11 x86 to original x64 neural engine; same-frame CPU barriers.";
+BOOL APIENTRY DllMain(HMODULE module,DWORD reason,LPVOID){
+    if(reason==DLL_PROCESS_ATTACH){
+        if(!reshade::register_addon(module))return FALSE;
+        reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(OnBind);
+        reshade::register_event<reshade::addon_event::draw>(OnDraw);
+        reshade::register_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
+        reshade::register_event<reshade::addon_event::init_swapchain>(OnInit);
+        reshade::register_event<reshade::addon_event::destroy_swapchain>(OnDestroy);
+        reshade::register_event<reshade::addon_event::present>(OnPresent);
+        reshade::register_overlay("DLSS Neural Rendering (AMD)",OnOverlay32);
+    }else if(reason==DLL_PROCESS_DETACH){
+        reshade::unregister_overlay("DLSS Neural Rendering (AMD)",OnOverlay32);
+        reshade::unregister_addon(module);
+        // No waits or graphics calls while holding the loader lock. Normal retirement is
+        // in destroy_swapchain. The private kill-on-close job isolates forced unload/exit.
+        g.job.reset();g.pipe.reset();g.process.reset();if(logFile){fclose(logFile);logFile=nullptr;}
+    }
+    return TRUE;
+}

@@ -1,0 +1,23 @@
+Compared to preserved previous installer source ZIP a09069543ad63397ed5437b449e7110cf5d7ad46d2cb76860f3f737cf428e73b
+
+MODIFIED ADDITIVE FILES
+build-x86bridge.ps1
+docs/x86bridge-changes.txt
+docs/x86bridge-install.md
+docs/x86bridge-installer-tests.txt
+docs/x86bridge-new-files.txt
+docs/x86bridge-package.sha256
+docs/x86bridge-preservation.json
+installer-x86/core.h
+installer-x86/main.cpp
+installer-x86/tests.cpp
+src/x86bridge/control_state.h
+src/x86bridge/host64.cpp
+src/x86bridge/protocol_test.cpp
+tools/test-x86bridge-factory.py
+
+NEW ADDITIVE FILES
+docs/x86bridge-visual-025-tests.txt
+docs/x86bridge-visual-025.md
+
+UPSTREAM: 55/55 intact; modified=0, deleted=0.
