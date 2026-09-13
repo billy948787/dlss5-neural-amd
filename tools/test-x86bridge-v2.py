@@ -1,7 +1,10 @@
 from pathlib import Path
-import re,subprocess,tempfile,shutil
+import os,re,subprocess,tempfile,shutil
 r=Path(__file__).resolve().parents[1];n=r/'src/x86bridge'
-s=(n/'overlay32.inc').read_text()
+read=lambda path:path.read_text(encoding='utf-8-sig')
+compiler=os.environ.get('CXX') or shutil.which('g++')
+if not compiler:raise SystemExit('Set CXX to a C++20 compiler')
+s=read(n/'overlay32.inc')
 pre='''#include <imgui.h>
 #include "control_state.h"
 #include <string>
@@ -26,12 +29,12 @@ void OperationalSettings(){}
 #include "overlay32.inc"
 '''
 with tempfile.TemporaryDirectory(prefix='x86bridge-ui-') as d:
- p=Path(d)/'overlay.cpp';p.write_text(pre)
- subprocess.run([shutil.which('g++'),'-std=c++20','-Wall','-Wextra','-Werror','-fsyntax-only','-I'+str(n),'-I'+str(r/'external/reshade'),str(p)],check=True)
+ p=Path(d)/'overlay.cpp';p.write_text(pre,encoding='utf-8')
+ subprocess.run([compiler,'-std=c++20','-Wall','-Wextra','-Werror','-fsyntax-only','-I'+str(n),'-I'+str(r/'external/reshade'),str(p)],check=True)
 print('PASS overlay source syntax against real bundled imgui.h; Win32 functions mocked, not native ABI validation')
 
 # Compile the actual host ExportSettings/ApplySettings bodies, with only original g atomics doubled.
-h=(n/'host64.cpp').read_text()
+h=read(n/'host64.cpp')
 methods=h[h.index('    WireSettings ExportSettings()'):h.index('    WireStatus ExportStatus()')]
 state=r'''#include "control_state.h"
 #include <atomic>
@@ -59,12 +62,12 @@ int main(){Host host;WireSettings s; s.settings_revision=2;s.skin=-1;s.useHistor
 }
 '''
 with tempfile.TemporaryDirectory(prefix='x86bridge-state-') as d:
- p=Path(d);(p/'state.cpp').write_text(state)
- subprocess.run([shutil.which('g++'),'-std=c++20','-Wall','-Wextra','-Werror','-I'+str(n),str(p/'state.cpp'),'-o',str(p/'state')],check=True)
+ p=Path(d);(p/'state.cpp').write_text(state,encoding='utf-8')
+ subprocess.run([compiler,'-std=c++20','-Wall','-Wextra','-Werror','-I'+str(n),str(p/'state.cpp'),'-o',str(p/'state')],check=True)
  subprocess.run([str(p/'state')],check=True)
 print('PASS actual host Apply/Export: finite clamp, stale reject/no mutation, history change only, operational fields mirrored, forced inline')
 # No I/O in UI or its local helpers. The only control transaction owner is OnPresent.
-ui=(n/'overlay32.inc').read_text();front=(n/'frontend32.cpp').read_text()
+ui=read(n/'overlay32.inc');front=read(n/'frontend32.cpp')
 for call in ['Request(', 'ReadFile(', 'WriteFile(', 'WaitFor', 'FlushAndWait', 'StartHost(', 'StateRequest(', 'SyncControls(', 'SaveSettings(', 'LoadSettings(']:
  assert call not in ui,call
 assert 'std::try_to_lock' in ui and 'controls.save=true' in ui and 'controls.reload=true' in ui and 'controls.measure=true' in ui
@@ -73,9 +76,10 @@ assert front.index('if(!SyncControls()')<front.index('Kind::Frame,&f')
 for name in ['Silent Hill','Resident Evil','God of War','GTA V','NFS','ProfileForThisProcess','kTargets']:
  assert name not in ui+front+h,name
 assert 'Async previous-frame presentation is not implemented' in ui
+assert 'ImGui::IsItemDeactivated()' in ui and 'editingScaleActive' in ui
 assert 'g.inlineMode.store(true)' in h and 'LoadSettings();ForceInline();' in h
 assert 'register_overlay("DLSS Neural Rendering (AMD)",OnOverlay32)' in front
 assert h.index('SaveSettings();Snapshot')>h.index('case Kind::SaveSettings:')
-fields=(n/'settings_fields.inc').read_text()
+fields=read(n/'settings_fields.inc')
 assert all(re.fullmatch(r'X\((uint32_t|int32_t|float), [A-Za-z]+, [-.0-9]+, [-.0-9]+\)',line) for line in fields.splitlines() if not line.startswith('//'))
 print('PASS overlay has no IPC/waits; present-only controls; frontend-only shadow; original host Save/Reload; same-frame lock; generic source')

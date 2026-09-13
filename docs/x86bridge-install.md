@@ -6,7 +6,7 @@ Build from the project directory on Windows with Visual Studio C++ and Windows S
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-x86bridge.ps1
 ```
 
-The script preserves the original build.ps1, compiles addon32 x86 /MT, host64 x64 /MT and the new installer x64 /MT, tests protocol on both architectures, checks addon imports, and builds original addon64 in a temporary baseline copy. It places the new pair and installer in `release/`. With the private sidecars present, it also runs installer filesystem tests there. Those tests use synthetic PE targets, never the real game folder.
+The script compiles addon32 x86 /MT, host64 x64 /MT and the new installer x64 /MT, tests the protocol on both architectures, checks PE/import boundaries, and builds the current integrated addon64 from the same checkout. It places the new pair and installer in `release/`. With the private sidecars present, it also runs installer filesystem tests there. Those tests use synthetic PE targets, never the real game folder.
 
 Open `release/dlss5-installer-x86.exe`, browse to the actual x86 executable and select D3D11, D3D9 or D3D8. PE32+ targets are rejected. API selection is manual; import-based autodetection was not added. Close the game before install/uninstall.
 
@@ -32,13 +32,13 @@ If there is an unusual existing layout without a docked Home, the installer pres
 - Uninstall restores unchanged backups and removes owned unmodified binaries. Personal configs and files modified after installation are retained with warnings and manifest records. It never removes unrelated files. Installation journals target writes; interrupted installs can be recovered via uninstall; do not delete the manifest/backups.
 - Existing HIP installation is a prerequisite, unchanged from the validated setup. No HIP installer or new runtime was introduced.
 
-Official Setup sidecar arguments were checked against the [official ReShade Setup source](https://github.com/crosire/reshade/blob/main/setup/MainWindow.xaml.cs). The Windows Setup/extraction path is not executable here and remains UNVALIDATED. Its output must match the tested 6.8.0.2156 x86 Full Add-on Support hash; other versions fail closed. No third-party license policy is expanded by this contribution; public packaging excludes those payloads and uses sidecars.
+The installer never launches a ReShade Setup executable. Install ReShade Full Add-on Support manually, or provide the separately obtained x86 `dxgi.dll` sidecar whose SHA-256 matches the supported 6.8.0.2156 build. Other versions fail closed. No third-party license policy is expanded by this contribution; public packaging excludes those payloads and uses sidecars.
 
 ## Tests and manual regression
 
-Executed portable tests: protocol/control/frame preservation; actual host Factory methods with original defaults and doubled engine state; installer filesystem operations with real pinned payloads; SHA validation and exact wrapper extraction; docking merges at 1280x720 and 2560x1440. See x86bridge-tests.txt and x86bridge-installer-tests.txt.
+Portable tests cover the protocol, control flow, IPC timeout behavior, overlay compilation and host Factory methods with engine-state doubles. Installer filesystem tests cover SHA validation, exact wrapper extraction, transactional recovery and docking merges when a private pinned-payload fixture is supplied.
 
-MSVC build/PE imports for NEW binaries, Windows installer UI, Windows ZIP/Setup invocation, live docking and GPU/game runtime are UNVALIDATED. The supplied working v2 pair is retained only as a clearly labeled rollback baseline, not as the new build.
+MSVC build/PE imports are covered by `build-x86bridge.ps1` and CI. Windows installer UI, Windows ZIP extraction, live docking and GPU/game runtime still require live validation.
 
 Local checklist (no game-specific production code):
 1. RE1 HD Remaster and RE5: D3D9 preset; test RE5 4K. Silent Hill 3: D3D8 preset. Verify internal3D/VRAM4096, no ERR08, LUID MATCH and result=1 same_frame=1.

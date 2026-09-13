@@ -1,8 +1,12 @@
 """Compile the actual additive host factory methods against captured upstream defaults."""
 from pathlib import Path
-import re,subprocess,tempfile,shutil
-r=Path(__file__).resolve().parents[1];n=r/'src/x86bridge';h=(n/'host64.cpp').read_text();u=(r/'src/neural/neural.cpp').read_text(encoding='utf-8-sig');ui=(n/'overlay32.inc').read_text();front=(n/'frontend32.cpp').read_text()
-fields=re.findall(r'^X\((\w+), (\w+),', (n/'settings_fields.inc').read_text(), re.M)
+import os,re,subprocess,tempfile,shutil
+r=Path(__file__).resolve().parents[1];n=r/'src/x86bridge'
+read=lambda path:path.read_text(encoding='utf-8-sig')
+compiler=os.environ.get('CXX') or shutil.which('g++')
+if not compiler:raise SystemExit('Set CXX to a C++20 compiler')
+h=read(n/'host64.cpp');u=read(r/'src/neural/neural.cpp');ui=read(n/'overlay32.inc');front=read(n/'frontend32.cpp')
+fields=re.findall(r'^X\((\w+), (\w+),', read(n/'settings_fields.inc'), re.M)
 # Every test initial value comes from the original State declaration, not a second default table.
 initial=[]
 for typ,name in fields:
@@ -51,8 +55,8 @@ int main(){
 }
 '''
 with tempfile.TemporaryDirectory(prefix='factory-test-') as d:
- p=Path(d);(p/'test.cpp').write_text(source)
- subprocess.run([shutil.which('g++'),'-std=c++20','-Wall','-Wextra','-Werror','-I'+str(n),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
+ p=Path(d);(p/'test.cpp').write_text(source,encoding='utf-8')
+ subprocess.run([compiler,'-std=c++20','-Wall','-Wextra','-Werror','-I'+str(n),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],cwd=p,check=True)
 assert 'CaptureFactoryDefaults();EnsureX86Ini();LoadSettings();' in h
 assert 'controls.factory=true' in ui and 'Kind::Command,&c,sizeof(c),true' in front

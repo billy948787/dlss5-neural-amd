@@ -16,6 +16,11 @@
 # Build and run output
 build/
 builds/
+build-x86bridge/
+release/
+dlss5-x86bridge-*.zip
+__pycache__/
+*.py[cod]
 diagnostic-logs-backup/
 dlss5-runtime-v*/
 *.log

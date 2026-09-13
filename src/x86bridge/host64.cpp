@@ -74,9 +74,9 @@ struct Host {
     void RestoreFactoryDefaults(){
         // No INI access. Restore constructed upstream defaults plus the five x86 overrides.
         auto s=FactorySettings(factoryDefaults,ExportSettings());
-        const bool historyChanged=s.useHistory!=g.useHistory.load();
-        const bool guidesChanged=historyChanged||s.useMotion!=g.useMotion.load()||
-            s.useDepth!=g.useDepth.load()||s.useGameGuides!=g.useGameGuides.load()||s.temporalMode!=g.temporalMode.load()||
+        const bool historyChanged=(s.useHistory!=0)!=g.useHistory.load();
+        const bool guidesChanged=historyChanged||(s.useMotion!=0)!=g.useMotion.load()||
+            (s.useDepth!=0)!=g.useDepth.load()||(s.useGameGuides!=0)!=g.useGameGuides.load()||s.temporalMode!=g.temporalMode.load()||
             s.motionScale!=g.motionScale.load()||s.flowGate!=g.flowGate.load()||s.flowRatio!=g.flowRatio.load();
         Require(ApplySettings(s),"factory defaults rejected");
         if(guidesChanged&&!historyChanged)g.historyValid.store(false);
@@ -278,7 +278,9 @@ struct Host {
         Header h;Require(Receive(pipe.value,parent.value,&h,sizeof(h))&&ValidHeader(h)&&h.kind==Kind::Hello,"HELLO header");
         Hello hello;Require(Receive(pipe.value,parent.value,&hello,sizeof(hello)),"HELLO body");Init(hello);Reply(Kind::Hello,Result::Ready);
         for(;;){
-            Require(Receive(pipe.value,parent.value,&h,sizeof(h))&&ValidHeader(h),"IPC header/peer closed");
+            // Waiting for the next request while the game is idle is intentionally unbounded.
+            // Every operation after a header, and every frontend wait, remains bounded.
+            Require(Receive(pipe.value,parent.value,&h,sizeof(h),INFINITE)&&ValidHeader(h),"IPC header/peer closed");
             switch(h.kind){
             case Kind::GetState:case Kind::Status:Snapshot(h.kind);break;
             case Kind::SetState:{WireSettings s;Require(Receive(pipe.value,parent.value,&s,sizeof(s)),"SET_STATE body");

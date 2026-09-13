@@ -7,10 +7,9 @@ void check(bool b,const char* msg){i::require(b,msg);++passed;std::cout<<"PASS "
 template<class F> void rejects(F f,const char* msg){bool threw=false;try{f();}catch(const std::exception&){threw=true;}check(threw,msg);}
 i::Bytes pe(bool x64=false){i::Bytes b(512);b[0]='M';b[1]='Z';b[60]=128;b[128]='P';b[129]='E';b[132]=x64?0x64:0x4c;b[133]=x64?0x86:1;b[152]=x64?0x0b:0x0b;b[153]=x64?2:1;return b;}
 int main(int argc,char** argv){try{
-    i::require(argc==2,"tests require release fixture folder (files + sidecar ZIP + payload.sha256)");fs::path release=fs::absolute(argv[1]);
+    i::require(argc<=2,"usage: installer-tests.exe [release fixture folder]");
     auto root=fs::temp_directory_path()/("x86-installer-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));fs::create_directory(root);
     struct Clean{fs::path p;~Clean(){std::error_code ec;fs::remove_all(p,ec);}}clean{root};
-    i::Installer app;app.release=release;app.extract=i::extractArchive;
     check(i::sha(i::bytes("abc"))=="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","SHA256 known vector");
     for(auto size:{std::pair<unsigned,unsigned>{1280,720},{2560,1440}}){auto s=i::firstDock("[INPUT]\nKeyOverlay=36,0,0,0\n",size.first,size.second);
         check(s.find("Size="+std::to_string(size.first)+",,"+std::to_string(size.second))!=s.npos,"fresh docking follows supplied viewport");
@@ -23,6 +22,11 @@ int main(int argc,char** argv){try{
     check(i::getIni(merge,"OVERLAY","Docking")=="other-layout"&&i::getIni(merge,"STYLE","Alpha")=="0.7","existing docking geometry and style untouched");
     std::string undocked="[OVERLAY]\nWindow=[Window][DLSS Neural Rendering (AMD)],Pos=37,,49,Size=600,,400\n";
     check(i::firstDock(undocked,1920,1080)==undocked,"user-undocked window respected");
+    i::Manifest manifest;manifest.preset="D3D11";manifest.entries.push_back({"dlss5-neural.addon32",std::string(64,'a'),"","",true,false});
+    check(i::encode(i::decode(i::encode(manifest)))==i::encode(manifest),"manifest canonical roundtrip");
+    rejects([&]{i::decode(i::encode(manifest)+"junk");},"modified manifest rejected");
+    if(argc!=2){std::cout<<"TOTAL PASS="<<passed<<". Core installer tests; pinned payload fixture not supplied.\n";return 0;}
+    fs::path release=fs::absolute(argv[1]);i::Installer app;app.release=release;app.extract=i::extractArchive;
     for(auto preset:{"D3D11","D3D9","D3D8"}){
         auto dir=root/preset;fs::create_directory(dir);auto target=dir/"target.exe";i::write(target,pe());app.install(target,preset);
         check(i::hashFile(dir/"dxgi.dll")==i::ReShadeSha,"ReShade x86 installed only as DXGI");

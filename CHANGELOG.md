@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — Experimental x86 bridge
+
+- Add a 32-bit D3D11 ReShade frontend and a separate 64-bit host that reuses the existing neural
+  engine and HIP runtime on the game's exact adapter.
+- Define a fixed-width protocol with process identity, generation, frame and settings-revision
+  validation across the x86/x64 boundary.
+- Bound frontend IPC and helper startup waits so an unresponsive helper falls back instead of
+  freezing the game's Present thread indefinitely.
+- Apply Resolution Scale only after slider editing ends, avoiding repeated network-raster staging
+  and unnecessary VRAM growth while dragging.
+- Stop the x86 installer from executing an unverified ReShade Setup sidecar. ReShade remains a
+  manual prerequisite or a separately supplied, hash-pinned payload.
+- Replace the stale checkout-hash baseline with builds of the current integrated source tree.
+- Add Windows x86/x64 build, protocol, PE/import and native named-pipe timeout checks to CI, plus
+  portable protocol/control tests on Linux.
+- D3D8 and D3D9 remain translation presets through dgVoodoo, not native rendering backends.
+
 ## v0.4.1 — Native Vulkan game stability
 
 This release hardens the experimental Vulkan route for native games, validated on Detroit: Become

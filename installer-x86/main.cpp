@@ -1,5 +1,9 @@
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include "platform.h"
 #include <commdlg.h>
 #include <cmath>
@@ -160,8 +164,8 @@ LRESULT CALLBACK proc(HWND window,UINT msg,WPARAM w,LPARAM l){
             bool failed=false;
             try {auto text=value(targetBox);install86::require(!text.empty(),"Select the target executable first");std::filesystem::path target=text;
                 if(id==12){install86::require(install86::machine(install86::read(target))==0x14c,"x64 target refused: select an x86 executable");
-                    busy(window,true);install86::prepareOfficialReShade(release,target);
-                    auto i=selectedPreset;app.install(target,i==0?"D3D11":i==1?"D3D9":"D3D8");}
+                    busy(window,true);auto i=selectedPreset;
+                    app.install(target,i==0?"D3D11":i==1?"D3D9":"D3D8");}
                 else {if(MessageBoxW(window,L"Remove files owned by this installation and restore unchanged backups? Personal or modified configuration files will be kept.",L"Uninstall x86 bridge",MB_YESNO|MB_ICONQUESTION)!=IDYES)return 0;busy(window,true);app.uninstall(target.parent_path());}
             }catch(const std::exception& e){failed=true;app.note(std::string("ERROR: ")+e.what());}
             std::string result;for(const auto& entry:app.log)result+=entry+"\r\n";details=wide(result);

@@ -39,3 +39,32 @@ jobs:
           path: |
             build/*.addon64
             build/dlss5-framecheck.exe
+
+  x86-bridge:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test x86 bridge
+        shell: pwsh
+        run: .\build-x86bridge.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x86-bridge
+          path: |
+            build-x86bridge/dlss5-neural.addon32
+            build-x86bridge/dlss5-neural-host64.exe
+            build-x86bridge/dlss5-installer-x86.exe
+            build-x86bridge/protocol-test-*.log
+            build-x86bridge/io-test-*.log
+            build-x86bridge/imports-*.txt
+            build-x86bridge/SHA256SUMS.txt
+
+  x86-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test x86 bridge contracts and control flow
+        run: python3 tools/test-x86bridge.py

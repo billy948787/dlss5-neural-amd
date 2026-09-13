@@ -182,7 +182,7 @@ void StopHost(){
     // A fatal partial operation is never followed by texture reuse in a new frame.
     controls.synced=false;controls.status={};controls.save=controls.reload=controls.factory=controls.measure=controls.capturing=false;
     g.pipe.reset();if(g.process&&WaitForSingleObject(g.process.value,0)!=WAIT_OBJECT_0){
-        TerminateProcess(g.process.value,7);WaitForSingleObject(g.process.value,INFINITE);
+        TerminateProcess(g.process.value,7);WaitForSingleObject(g.process.value,x86bridge::IpcTimeoutMs);
     }
     g.job.reset();g.process.reset();g.built=false;g.reset=true;
 }
@@ -489,13 +489,18 @@ bool StartHost(){
     if(!AssignProcessToJobObject(g.job.value,g.process.value)||ResumeThread(thread.value)==DWORD(-1)){cancel();return false;}
     if(pending){
         HANDLE waits[]={event.value,g.process.value};DWORD n=0;
-        if(WaitForMultipleObjects(2,waits,FALSE,INFINITE)!=WAIT_OBJECT_0){cancel();return false;}
+        const DWORD connected=WaitForMultipleObjects(2,waits,FALSE,x86bridge::StartupTimeoutMs);
+        if(connected!=WAIT_OBJECT_0){
+            const DWORD error=connected==WAIT_TIMEOUT?ERROR_TIMEOUT:
+                connected==WAIT_OBJECT_0+1?ERROR_BROKEN_PIPE:GetLastError();
+            cancel();SetLastError(error);return false;
+        }
         if(!GetOverlappedResult(g.pipe.value,&ov,&n,FALSE))return false;
     }
     ULONG client=0;if(!GetNamedPipeClientProcessId(g.pipe.value,&client)||client!=g.hostPid)return false;
     x86bridge::Hello h;h.pid=GetCurrentProcessId();h.luidLow=g.luid.LowPart;h.luidHigh=g.luid.HighPart;
     x86bridge::Ack a;
-    const bool ok=x86bridge::Request(g.pipe.value,g.process.value,x86bridge::Kind::Hello,&h,sizeof(h),a)&&a.result==x86bridge::Result::Ready&&a.luidLow==h.luidLow&&a.luidHigh==h.luidHigh;
+    const bool ok=x86bridge::Request(g.pipe.value,g.process.value,x86bridge::Kind::Hello,&h,sizeof(h),a,x86bridge::StartupTimeoutMs)&&a.result==x86bridge::Result::Ready&&a.luidLow==h.luidLow&&a.luidHigh==h.luidHigh;
     Log("x86bridge HELLO host_pid=%lu LUID=%08lX:%08lX %s",g.hostPid,g.luid.HighPart,g.luid.LowPart,ok?"MATCH":"FAILED");
     return ok;
 }

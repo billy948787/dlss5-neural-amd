@@ -19,15 +19,6 @@ inline Bytes extractArchive(const fs::path& zip,const std::string& entry){
     powershell(L"Add-Type -AssemblyName System.IO.Compression.FileSystem;$z=[IO.Compression.ZipFile]::OpenRead("+psQuote(fs::absolute(zip).wstring())+L");try {$e=$z.GetEntry("+psQuote(name)+L");if($null -eq $e){throw 'Missing ZIP entry'};[IO.Compression.ZipFileExtensions]::ExtractToFile($e,"+psQuote(out.wstring())+L")}finally{$z.Dispose()}");
     return read(out);
 }
-// Optional official Setup sidecar. Operates only on an isolated copied PE, not on game files.
-inline bool prepareOfficialReShade(const fs::path& release,const fs::path& target){
-    if(fs::exists(release/L"files/dxgi.dll"))return false;
-    auto setup=release/L"ReShade_Setup_6.8.0_Addon.exe";if(!fs::exists(setup))return false;
-    Temp temp;auto dummy=temp.path/L"bridge-setup-target.exe";fs::copy_file(target,dummy);
-    powershell(L"& "+psQuote(fs::absolute(setup).wstring())+L" "+psQuote(dummy.wstring())+L" --headless --api dxgi;if($LASTEXITCODE -ne 0){throw 'ReShade Setup failed'}");
-    auto b=read(temp.path/L"dxgi.dll");hashIs(b,ReShadeSha,"Official Setup output (must match tested Full Add-on Support x86)");
-    fs::create_directories(release/L"files");write(release/L"files/dxgi.dll",b);return true;
-}
 }
 #else
 // Portable tests use the real pinned ZIP and zlib. Windows uses .NET ZIP support instead.

@@ -1,6 +1,6 @@
 # x86bridge overlay, protocol v2
 
-Generic native D3D11 x86 frontend to the original x64 neural engine. This source update adds the ReShade panel **DLSS Neural Rendering (AMD)**. The 55 upstream files remain byte-identical. Previous source ZIP remains intact (SHA256 2898160feb1e153869103f9c0a23fdfcf8355bd7451b874efedd5565b54a405f).
+Generic native D3D11 x86 frontend to the original x64 neural engine. This source update adds the ReShade panel **DLSS Neural Rendering (AMD)** while keeping the 32-bit transport isolated from the existing x64 rendering routes.
 
 ## Build and install
 
@@ -10,7 +10,7 @@ On Windows with Visual Studio C++ x86/x64 tools and Windows SDK, from this folde
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-x86bridge.ps1
 ```
 
-The existing script invokes native `Hostx64\x86\cl.exe` and `Hostx64\x64\cl.exe`, C++20, `/MT`; runs protocol tests for both architectures, checks PE/imports, and builds the original addon64 only in a temporary copy. Output:
+The script invokes native `Hostx64\x86\cl.exe` and `Hostx64\x64\cl.exe`, C++20, `/MT`; runs protocol tests for both architectures, checks PE/imports, and builds the current integrated addon64 from the same checkout. Output:
 
 - `build-x86bridge/dlss5-neural.addon32` (x86)
 - `build-x86bridge/dlss5-neural-host64.exe` (x64)
@@ -19,7 +19,7 @@ With the application closed, copy **both** files beside its executable, replacin
 
 Open ReShade and the DLSS Neural Rendering (AMD) panel. Initial settings come from the host's original LoadSettings, not frontend defaults. If the effect starts disabled, opening the panel requests synchronization through the next D3D11 Present and the existing helper launch path.
 
-This executor has no Windows/MSVC. This delivery contains source, not newly built Windows binaries. Native build, imports and live overlay are **UNVALIDATED** here; no old v1 binary is presented as v2. Run the above command locally.
+The native x86/x64 build and protocol checks run in GitHub Actions. Live ReShade, GPU and game behavior still require manual validation on supported AMD hardware.
 
 ## Changes and ownership
 
@@ -90,4 +90,4 @@ No claim of newly validated Windows/GPU UI behavior. D3D11 x86 only; D3D8/D3D9 n
 
 ## Incremental update: Factory Defaults and additive installer
 
-See [x86bridge-install.md](x86bridge-install.md). Factory Defaults now restores captured upstream tuning in memory with x86 overrides, preserving operational preferences. A new installer-x86 directory provides generic D3D11/D3D9/D3D8 presets, pinned standalone dgVoodoo and private/public sidecar layouts. Original installer/ is unchanged. Native Windows build for this update is UNVALIDATED.
+See [x86bridge-install.md](x86bridge-install.md). Factory Defaults restores captured upstream tuning in memory with x86 overrides while preserving operational preferences. The separate installer-x86 directory provides generic D3D11/D3D9/D3D8 presets, pinned standalone dgVoodoo and private/public sidecar layouts. Native builds are covered by CI; live game and GPU validation remains manual.

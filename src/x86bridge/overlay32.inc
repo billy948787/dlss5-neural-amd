@@ -573,11 +573,27 @@ void Draw()
         ImGui::EndDisabled();
         Help("Async previous-frame presentation is not implemented by the x86 process bridge yet.",
              "Apresentação assíncrona do quadro anterior ainda não foi implementada no bridge x86.");
-        float v = g.scale.load();
+        // Preview while dragging, but commit only once when the edit ends. Re-staging the
+        // network raster on every mouse movement leaves retired runtime/driver allocations
+        // resident and can quickly exhaust VRAM.
+        static float editingScale = g.scale.load();
+        static bool editingScaleActive = false;
+        if (!editingScaleActive)
+            editingScale = g.scale.load();
+        float v = editingScale;
         if (Risk r(v > 1.0f && g.inlineMode.load() ? kDanger : kWarn, v > 0.50f);
             ImGui::SliderFloat(T("Resolution Scale", "Escala de Resolução"), &v, 0.25f, 2.0f,
                                "%.2f", 0))
-            g.scale.store(v);
+            editingScale = v;
+        if (ImGui::IsItemActive())
+            editingScaleActive = true;
+        if (ImGui::IsItemDeactivated())
+        {
+            if (editingScaleActive && editingScale != g.scale.load())
+                g.scale.store(editingScale);
+            editingScaleActive = false;
+        }
+        v = editingScale;
         Help("Network width and height relative to the game frame. 0.50 uses a quarter of the pixels; "
              "1.00 uses the full frame. Lower scales reduce fine detail and inference cost. "
              "Materials can still change below 1.00. Measure frame time at the chosen resolution.",
