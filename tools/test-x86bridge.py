@@ -76,12 +76,12 @@ using HANDLE=void*;using DWORD=uint32_t;using BOOL=int;
 constexpr BOOL FALSE=0,TRUE=1;const HANDLE INVALID_HANDLE_VALUE=reinterpret_cast<HANDLE>(-1);
 constexpr DWORD INFINITE=0xffffffff,ERROR_IO_PENDING=997,ERROR_TIMEOUT=1460,ERROR_BROKEN_PIPE=109,WAIT_OBJECT_0=0,WAIT_TIMEOUT=258;
 struct OVERLAPPED{HANDLE hEvent;};
-inline int mode=0,calls=0,cancelled=0,retired=0,closed=0,waited=0;inline DWORD amount=0;inline void* target=nullptr;
+inline int mode=0,calls=0,cancelled=0,retired=0,closed=0,waited=0;inline DWORD amount=0,lastError=ERROR_IO_PENDING;inline void* target=nullptr;
 inline BOOL CloseHandle(HANDLE){++closed;return 1;}
 inline HANDLE CreateEventW(void*,BOOL,BOOL,void*){return reinterpret_cast<HANDLE>(1);}
-inline BOOL ReadFile(HANDLE,void* b,DWORD n,DWORD* done,OVERLAPPED*){++calls;amount=std::min(n,DWORD(3));target=b;if(mode==1||mode==2)return 0;*done=mode==3?0:amount;memset(b,42,*done);return 1;}
+inline BOOL ReadFile(HANDLE,void* b,DWORD n,DWORD* done,OVERLAPPED*){++calls;amount=std::min(n,DWORD(3));target=b;if(mode==1||mode==2||mode==5){lastError=ERROR_IO_PENDING;return 0;}*done=mode==3?0:amount;memset(b,42,*done);return 1;}
 inline BOOL WriteFile(HANDLE h,void* b,DWORD n,DWORD* done,OVERLAPPED* ov){return ReadFile(h,b,n,done,ov);}
-inline DWORD lastError=ERROR_IO_PENDING;inline DWORD GetLastError(){return mode==4?5:lastError;}inline void SetLastError(DWORD e){lastError=e;}
+inline DWORD GetLastError(){return mode==4?5:lastError;}inline void SetLastError(DWORD e){lastError=e;}
 inline DWORD WaitForMultipleObjects(DWORD n,HANDLE*,BOOL,DWORD timeout){assert(n==2&&timeout==5000);++waited;return mode==2?1:mode==5?WAIT_TIMEOUT:0;}
 inline BOOL CancelIoEx(HANDLE,OVERLAPPED*){++cancelled;return 1;}
 inline BOOL GetOverlappedResult(HANDLE,OVERLAPPED*,DWORD* n,BOOL wait){if(wait){++retired;return 0;}*n=amount;memset(target,42,amount);return 1;}
