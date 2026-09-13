@@ -65,7 +65,7 @@ void paint(HWND window,HDC dc){
     text(dc,L"DLSS",28,67,150,50,brandFont,foreground);text(dc,L"5",166,67,55,50,brandFont,red);
     text(dc,L"Neural Rendering\non AMD",28,126,222,72,brandBodyFont,foreground,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
     line(dc,28,218,92,218,red,3);
-    text(dc,L"x86 bridge for\nD3D11 / D3D9 / D3D8",28,244,222,62,smallFont,muted,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
+    text(dc,L"native x86 bridge for\nD3D11 / D3D9",28,244,222,62,smallFont,muted,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
     text(dc,L"INDEPENDENT\nCOMMUNITY PROJECT",28,h-64,218,48,smallFont,muted,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
     text(dc,L"A COMMUNITY PROJECT",286,25,790,20,smallFont,muted,DT_RIGHT|DT_TOP|DT_NOPREFIX);
     heading(dc,1,L"Game Executable",66);
@@ -74,11 +74,11 @@ void paint(HWND window,HDC dc){
     heading(dc,2,L"Rendering API Preset",246);
     text(dc,L"Select the DirectX version used by the game.",362,304,690,26,bodyFont,muted);
     if(selectedPreset!=0){
-        heading(dc,3,L"Important for D3D8 / D3D9",514);
+        heading(dc,3,L"Important for D3D9",514);
         text(dc,L"!",310,583,38,44,brandBodyFont,RGB(255,183,69),DT_CENTER|DT_TOP|DT_NOPREFIX);
         text(dc,L"Install the official ReShade version with Full Add-on Support and select",362,580,690,28,bodyFont,foreground);
-        text(dc,L"DirectX 10/11/12",362,608,220,26,titleFont,RGB(255,183,69));
-        text(dc,L"during ReShade installation, even if the game uses DirectX 8 or DirectX 9.",362,640,690,28,bodyFont,muted);
+        text(dc,L"DirectX 9",362,608,220,26,titleFont,RGB(255,183,69));
+        text(dc,L"during ReShade installation. No translation wrapper is required.",362,640,690,28,bodyFont,muted);
     }
     line(dc,286,h-96,1076,h-96,border);
     text(dc,status.c_str(),286,h-60,384,48,bodyFont,foreground,DT_LEFT|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS|DT_NOPREFIX);
@@ -96,7 +96,7 @@ void drawButton(const DRAWITEMSTRUCT& d){
     if(card){
         auto colour=chosen?red:RGB(120,129,141);int mid=width/2;
         rectangle(dc,mid-19,22,38,26,fill,colour,2);line(dc,mid,48,mid,56,colour,2);line(dc,mid-10,56,mid+10,56,colour,2);
-        const wchar_t* labels[]={L"D3D11 x86",L"D3D9 x86",L"D3D8 x86"};
+        const wchar_t* labels[]={L"D3D11 x86",L"D3D9 x86",L"D3D8 unavailable"};
         text(dc,labels[id-20],0,69,width,28,titleFont,disabled?muted:foreground,DT_CENTER|DT_TOP|DT_NOPREFIX);
         auto brush=CreateSolidBrush(fill);auto pen=CreatePen(PS_SOLID,px(2)>0?px(2):1,colour);auto ob=SelectObject(dc,brush),op=SelectObject(dc,pen);
         Ellipse(dc,px(mid-9),px(108),px(mid+9),px(126));
@@ -125,7 +125,7 @@ void layout(HWND window){
     InvalidateRect(window,nullptr,TRUE);
 }
 void busy(HWND window,bool on){
-    for(auto button:{browseButton,cards[0],cards[1],cards[2],installButton,uninstallButton,detailsButton,targetBox})EnableWindow(button,!on);
+    for(auto button:{browseButton,cards[0],cards[1],installButton,uninstallButton,detailsButton,targetBox})EnableWindow(button,!on);
     if(on)status=L"Working. Please wait...";InvalidateRect(window,nullptr,FALSE);UpdateWindow(window);
 }
 HWND button(HWND window,const wchar_t* label,int id){
@@ -136,8 +136,9 @@ LRESULT CALLBACK proc(HWND window,UINT msg,WPARAM w,LPARAM l){
         targetBox=CreateWindowW(L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,0,0,1,1,window,nullptr,nullptr,nullptr);
         SendMessageW(targetBox,WM_SETFONT,reinterpret_cast<WPARAM>(bodyFont),TRUE);
         browseButton=button(window,L"Browse...",10);
-        const wchar_t* names[]={L"D3D11 x86 (selected)",L"D3D9 x86",L"D3D8 x86"};
+        const wchar_t* names[]={L"D3D11 x86 (selected)",L"D3D9 x86",L"D3D8 unavailable"};
         for(int i=0;i<3;++i)cards[i]=button(window,names[i],20+i);
+        EnableWindow(cards[2],FALSE);
         detailsButton=button(window,L"Details",14);uninstallButton=button(window,L"Uninstall",13);installButton=button(window,L"Install",12);
         layout(window);return 0;
     }
@@ -151,22 +152,22 @@ LRESULT CALLBACK proc(HWND window,UINT msg,WPARAM w,LPARAM l){
     if(msg==WM_DRAWITEM){drawButton(*reinterpret_cast<const DRAWITEMSTRUCT*>(l));return TRUE;}
     if(msg==WM_CTLCOLOREDIT){auto dc=reinterpret_cast<HDC>(w);SetTextColor(dc,foreground);SetBkColor(dc,RGB(16,18,21));return reinterpret_cast<LRESULT>(editBrush);}
     if(msg==WM_COMMAND){auto id=LOWORD(w);
-        if(id>=20&&id<=22){selectedPreset=id-20;
-            const wchar_t* labels[]={L"D3D11 x86",L"D3D9 x86",L"D3D8 x86"};
+        if(id>=20&&id<=21){selectedPreset=id-20;
+            const wchar_t* labels[]={L"D3D11 x86",L"D3D9 x86",L"D3D8 unavailable"};
             for(int i=0;i<3;++i){std::wstring name=labels[i];if(i==selectedPreset)name+=L" (selected)";SetWindowTextW(cards[i],name.c_str());InvalidateRect(cards[i],nullptr,TRUE);}
             layout(window);return 0;
         }
         if(id==14){MessageBoxW(window,details.empty()?L"Close the game before installation. Select its actual x86 executable. Existing files are backed up; personal tuning is preserved.":details.c_str(),L"Installation details",MB_OK|MB_ICONINFORMATION);return 0;}
         if(id==10){wchar_t file[32768]{};OPENFILENAMEW of{sizeof(of)};of.hwndOwner=window;of.lpstrFilter=L"Executable (*.exe)\0*.exe\0\0";of.lpstrFile=file;of.nMaxFile=32768;of.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST;if(GetOpenFileNameW(&of))SetWindowTextW(targetBox,file);return 0;}
         if(id==12||id==13){
-            install86::Installer app;app.release=release;app.extract=install86::extractArchive;
+            install86::Installer app;app.release=release;
             MONITORINFO mi{sizeof(mi)};if(GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&mi)){app.width=mi.rcWork.right-mi.rcWork.left;app.height=mi.rcWork.bottom-mi.rcWork.top;}
             bool failed=false;
             try {auto text=value(targetBox);install86::require(!text.empty(),"Select the target executable first");std::filesystem::path target=text;
                 if(id==12){install86::require(install86::machine(install86::read(target))==0x14c,"x64 target refused: select an x86 executable");
                     busy(window,true);auto i=selectedPreset;
-                    app.install(target,i==0?"D3D11":i==1?"D3D9":"D3D8");}
-                else {if(MessageBoxW(window,L"Remove files owned by this installation and restore unchanged backups? Personal or modified configuration files will be kept.",L"Uninstall x86 bridge",MB_YESNO|MB_ICONQUESTION)!=IDYES)return 0;busy(window,true);app.uninstall(target.parent_path());}
+                    app.install(target,i==0?"D3D11":"D3D9");}
+                else {if(MessageBoxW(window,L"Remove files owned by this installation and restore unchanged backups? Personal or modified configuration files will be kept.",L"Uninstall x86 bridge",MB_YESNO|MB_ICONQUESTION)!=IDYES)return 0;busy(window,true);app.uninstall(install86::installDirectory(target));}
             }catch(const std::exception& e){failed=true;app.note(std::string("ERROR: ")+e.what());}
             std::string result;for(const auto& entry:app.log)result+=entry+"\r\n";details=wide(result);
             status=failed?L"Could not complete. See Details.":L"Finished. Review Details for results.";busy(window,false);

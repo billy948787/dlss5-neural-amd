@@ -36,14 +36,16 @@ ReShade add-on that runs the DLSS-NR network on AMD cards.
 
 ## Experimental 32-bit bridge
 
-The `x86_testing` branch is integrating a 32-bit D3D11 ReShade frontend with a separate 64-bit
-neural host. A 32-bit game cannot load the 64-bit HIP runtime directly, so the frontend shares
-frame textures with the helper on the same GPU adapter and receives the completed frame back.
+The `x86_testing` branch is integrating a native 32-bit D3D9/D3D11 ReShade frontend with a
+separate 64-bit neural host. A 32-bit game cannot load the 64-bit HIP runtime directly, so the
+frontend shares frame textures with the helper on the same GPU adapter and receives the completed
+frame back. D3D9 crosses a private D3D9/D3D11 interop stage before using the same host protocol:
+D3D9Ex uses shared GPU textures, while classic D3D9 uses a bounded CPU-compatible staging fallback.
 
-This route is still under development and is not part of a stable release. D3D11 is the native
-frontend; D3D8 and D3D9 require dgVoodoo to translate them to D3D11. Build, protocol and IPC tests
-run in CI, while live game/GPU validation remains required. See [the x86 bridge design](docs/x86bridge.md)
-and [installation notes](docs/x86bridge-install.md).
+This route is still under development and is not part of a stable release. D3D9 and D3D11 are
+native frontends and do not require dgVoodoo. D3D8 is currently unsupported. Build, protocol and
+IPC tests run in CI, while live game/GPU validation remains required. See
+[the x86 bridge design](docs/x86bridge.md) and [installation notes](docs/x86bridge-install.md).
 
 Every tool for DLSS 5 (renodx-dlss, DLSS5-Feeder, DLSS5-Swapper) calls NVIDIA's
 `nvngx_dlssnr.dll`, so none of them do anything on a Radeon. This one drives the AMD port of the

@@ -12,7 +12,7 @@ try {
     foreach($name in @('dlss5-installer-x86.exe','payload.sha256','files/dlss5-neural.addon32','files/dlss5-neural-host64.exe')){Copy-Item -LiteralPath (Join-Path $release $name) -Destination (Join-Path $stage $name)}
     Copy-Item -LiteralPath (Join-Path $root 'docs/x86bridge-install.md') -Destination (Join-Path $stage 'README.md')
     if($Private){
-        foreach($name in @('dgVoodoo2_87_4.zip','files/dxgi.dll','files/dlssnr_amd_pass1.dll','files/dlssnr_on_amd_weights.bin')){
+        foreach($name in @('files/dxgi.dll','files/dlssnr_amd_pass1.dll','files/dlssnr_on_amd_weights.bin')){
             if(!(Test-Path -LiteralPath (Join-Path $release $name))){throw "Missing private sidecar: $name"}
             Copy-Item -LiteralPath (Join-Path $release $name) -Destination (Join-Path $stage $name)
         }

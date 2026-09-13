@@ -14,6 +14,12 @@ assert h.count('DllMain(')==0
 assert 'EnumAdapterByLuid' in h and 'got.LowPart==luid.LowPart&&got.HighPart==luid.HighPart' in h
 assert 'DuplicateHandle(GetCurrentProcess(),source.handle.value,g.process.value' in f
 assert 'CreateSharedHandle(' in f and 'OpenSharedHandle(handle.value' in h
+assert 'GetModuleFileNameW(addonModule' in f and 'addonModule=module;' in f
+for marker in ['device_api::d3d9','InitD3D9Bridge','OpenSharedResource(inputHandle',
+               'GetRenderTargetData','D3D11_MAP_WRITE','D3D11_MAP_READ','UpdateSurface']:
+ assert marker in f,marker
+assert 'reinterpret_cast<IDirect3DDevice9 *>(reshadeDevice->get_native())' in f
+assert 'dgvoodoo' not in f.lower()
 assert 'PIPE_REJECT_REMOTE_CLIENTS' in f and 'GetNamedPipeClientProcessId' in f
 assert 'IpcTimeoutMs=5000' in io and 'StartupTimeoutMs=60000' in io
 assert 'WaitForMultipleObjects(2,waits,FALSE,timeoutMs)' in io
@@ -25,6 +31,7 @@ for body in re.findall(r'struct \w+\s*\{(.*?)\};',ipc,re.S):
 # The normal return never references the shared output before same-frame confirmation.
 present=f[f.index('void OnPresent('):f.index('\n}\nextern "C"')]
 assert present.index('CopyResource(g.stageIn11')<present.index('CopyResource(g.colour.on11')<present.index('FlushAndWait11()')<present.index('Kind::Frame,&f')<present.index('Confirmed(a,f,g.transport)')<present.index('CopyResource(g.stageOut11')<present.index('CopyResource(bb.Get(),g.stageOut11')
+assert present.index('UploadD3D9Frame(bb9.Get())')<present.index('Kind::Frame,&f')<present.index('DownloadD3D9Frame(bb9.Get())')
 assert 'mods&g.toggleMods' in present and 'IsIconic' in present and 'g.reset=true' in present
 assert 'g.game11ctx->ClearState()' in f
 assert 'const std::wstring name=L"\\\\\\\\.\\\\pipe\\\\dlss5-x86bridge-"' in f

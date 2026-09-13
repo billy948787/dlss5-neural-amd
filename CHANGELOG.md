@@ -2,8 +2,11 @@
 
 ## Unreleased — Experimental x86 bridge
 
-- Add a 32-bit D3D11 ReShade frontend and a separate 64-bit host that reuses the existing neural
-  engine and HIP runtime on the game's exact adapter.
+- Add native 32-bit D3D9 and D3D11 ReShade frontends and a separate 64-bit host that reuses the
+  existing neural engine and HIP runtime on the game's exact adapter.
+- Bridge D3D9 frames through private D3D9/D3D11 staging resources: shared GPU textures on D3D9Ex
+  and a CPU-compatible upload/readback fallback on classic D3D9. This removes the dgVoodoo
+  dependency and its third-party binary/security-detection problems.
 - Define a fixed-width protocol with process identity, generation, frame and settings-revision
   validation across the x86/x64 boundary.
 - Bound frontend IPC and helper startup waits so an unresponsive helper falls back instead of
@@ -15,7 +18,9 @@
 - Replace the stale checkout-hash baseline with builds of the current integrated source tree.
 - Add Windows x86/x64 build, protocol, PE/import and native named-pipe timeout checks to CI, plus
   portable protocol/control tests on Linux.
-- D3D8 and D3D9 remain translation presets through dgVoodoo, not native rendering backends.
+- Honor ReShade's `[INSTALL] BasePath` when it safely points inside the selected game directory,
+  including Source-engine layouts that load the D3D9 proxy from `bin`.
+- D3D8 is temporarily unavailable until it has a native or otherwise safe maintained route.
 
 ## v0.4.1 — Native Vulkan game stability
 

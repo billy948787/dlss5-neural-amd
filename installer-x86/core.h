@@ -8,7 +8,6 @@
 #include <set>
 #include <regex>
 #include <algorithm>
-#include <functional>
 #include <stdexcept>
 #include <chrono>
 #include <cstdint>
@@ -22,10 +21,7 @@
 namespace install86 {
 namespace fs=std::filesystem;
 using Bytes=std::vector<unsigned char>;
-inline constexpr const char* Notice="Install the official ReShade version with Full Add-on Support and select DirectX 10/11/12 during ReShade installation, even if the game itself uses DirectX 8 or DirectX 9.";
-inline constexpr const char* ZipSha="74aeb464d829db80e3f4aa8fae235e6e3b38fc01188776c5c2376bb0dea0956e";
-inline constexpr const char* D8Sha="d6e8931e785e267f926c049d4d1257b00771e2de8c57c8f39e434ddf6185df06";
-inline constexpr const char* D9Sha="db1c445f7bcf699df1e175e974c779bdc7e19a468680a44884b1ab7078888d04";
+inline constexpr const char* Notice="Install the official ReShade version with Full Add-on Support for the game's real API. Native D3D9 and D3D11 are supported; D3D8 is not currently supported.";
 inline constexpr const char* RuntimeSha="ddd82d313aa74c2e7602d17dfb7e7cd90cca9bfc0306f581684d35d75d1b350b";
 inline constexpr const char* WeightsSha="6bf8dc931ef3ccffe18c82de26ab374156e7f19539ffcf8eabaa25dca5cf15ab";
 inline constexpr const char* ReShadeSha="da430e0a9c6eecefa0d1b27d05e16c426fb5d04e808b194d914eaac4b31bc0f8";
@@ -76,11 +72,6 @@ inline std::string setIni(std::string s,const std::string& section,const std::st
     if(!s.empty()&&s.back()!='\n')s+=nl;
     return s+nl+"["+section+"]"+nl+key+"="+value+nl;
 }
-inline std::string dgConfig(std::string s){
-    s=setIni(s,"General","OutputAPI","d3d11_fl11_0");
-    for(auto kv:std::vector<std::pair<std::string,std::string>>{{"VideoCard","internal3D"},{"VRAM","4096"},{"Filtering","appdriven"},{"Mipmapping","appdriven"},{"Resolution","unforced"},{"Antialiasing","appdriven"},{"dgVoodooWatermark","false"},{"FastVideoMemoryAccess","false"}})s=setIni(s,"DirectX",kv.first,kv.second);
-    return s;
-}
 inline std::string freshIni(){return "[dlss5]\r\n; x86 fresh-install overrides. All other values follow upstream defaults.\r\nScale=1.0\r\nColourStrength=0.25\r\nStructure=1\r\nSkin=1\r\nPasses=1\r\n";}
 inline std::string firstDock(std::string ini,unsigned width,unsigned height){
     auto windows=getIni(ini,"OVERLAY","Window");
@@ -110,9 +101,21 @@ inline void safePath(const fs::path& p){
 #endif
     }
 }
+inline fs::path installDirectory(const fs::path& target){
+    const auto root=fs::weakly_canonical(fs::absolute(target).parent_path());safePath(root);
+    const auto redirect=root/L"ReShade.ini";safePath(redirect);
+    if(!fs::exists(redirect))return root;
+    const auto configured=trim(getIni(str(read(redirect)),"INSTALL","BasePath"));
+    if(configured.empty())return root;
+    auto candidate=fs::path(configured);if(candidate.is_relative())candidate=root/candidate;
+    candidate=fs::weakly_canonical(candidate);safePath(candidate);
+    const auto relative=candidate.lexically_relative(root);
+    require(!relative.empty()&&*relative.begin()!=fs::path(".."),"ReShade BasePath must stay inside the selected game directory");
+    require(fs::is_directory(candidate),"ReShade BasePath is not an existing directory");return candidate;
+}
 struct Entry{std::string name,hash,backup,backupHash;bool owned=false,configuration=false;};
 struct Manifest{std::string preset,state="installed";std::vector<Entry> entries;};
-inline std::string encode(const Manifest& m){std::ostringstream o;o<<"{\n\"schema\":1,\n\"preset\":\""<<m.preset<<"\",\n\"state\":\""<<m.state<<"\",\n\"bridge_protocol\":2,\n\"dgVoodoo\":\""<<(m.preset=="D3D11"?"none":"2.87.4")<<"\",\n\"ReShade\":\"6.8.0.2156 Full Add-on Support\",\n\"files\":[\n";for(size_t i=0;i<m.entries.size();++i){auto& e=m.entries[i];o<<"{\"name\":\""<<e.name<<"\",\"sha256\":\""<<e.hash<<"\",\"backup\":\""<<e.backup<<"\",\"backup_sha256\":\""<<e.backupHash<<"\",\"owned\":"<<(e.owned?"true":"false")<<",\"configuration\":"<<(e.configuration?"true":"false")<<"}"<<(i+1==m.entries.size()?"":",")<<"\n";}return o.str()+"]\n}\n";}
+inline std::string encode(const Manifest& m){std::ostringstream o;o<<"{\n\"schema\":1,\n\"preset\":\""<<m.preset<<"\",\n\"state\":\""<<m.state<<"\",\n\"bridge_protocol\":2,\n\"dgVoodoo\":\""<<(m.preset=="D3D8"?"2.87.4":"none")<<"\",\n\"ReShade\":\"6.8.0.2156 Full Add-on Support\",\n\"files\":[\n";for(size_t i=0;i<m.entries.size();++i){auto& e=m.entries[i];o<<"{\"name\":\""<<e.name<<"\",\"sha256\":\""<<e.hash<<"\",\"backup\":\""<<e.backup<<"\",\"backup_sha256\":\""<<e.backupHash<<"\",\"owned\":"<<(e.owned?"true":"false")<<",\"configuration\":"<<(e.configuration?"true":"false")<<"}"<<(i+1==m.entries.size()?"":",")<<"\n";}return o.str()+"]\n}\n";}
 inline Manifest decode(const std::string& s){
     Manifest m;std::smatch v;require(std::regex_search(s,v,std::regex("\"schema\":1,")),"Unknown manifest schema");
     require(std::regex_search(s,v,std::regex("\"preset\":\"(D3D11|D3D9|D3D8)\"")),"Bad manifest preset");m.preset=v[1];
@@ -126,7 +129,14 @@ inline Manifest decode(const std::string& s){
         if(!e.backup.empty())require(fs::path(e.backup).filename()==e.name,"Backup filename mismatch");
         m.entries.push_back(e);
     }
-    size_t rows=0,pos=0;while((pos=s.find("\"name\":",pos))!=s.npos){++rows;pos+=7;}require(rows==m.entries.size()&&rows<=allowed().size(),"Malformed manifest entries");require(encode(m)==s,"Modified or unsupported install manifest");return m;
+    size_t rows=0,pos=0;while((pos=s.find("\"name\":",pos))!=s.npos){++rows;pos+=7;}require(rows==m.entries.size()&&rows<=allowed().size(),"Malformed manifest entries");
+    auto canonical=encode(m);bool supported=canonical==s;
+    if(!supported&&m.preset=="D3D9"){
+        const std::string current="\"dgVoodoo\":\"none\"",legacy="\"dgVoodoo\":\"2.87.4\"";
+        const auto at=canonical.find(current);if(at!=canonical.npos)canonical.replace(at,current.size(),legacy);
+        supported=canonical==s;
+    }
+    require(supported,"Modified or unsupported install manifest");return m;
 }
 inline void atomicManifest(const fs::path& dir,const Manifest& m){auto p=dir/ManifestName,tmp=dir/(std::string(ManifestName)+".tmp");safePath(tmp);write(tmp,bytes(encode(m)));
 #ifdef _WIN32
@@ -135,14 +145,13 @@ inline void atomicManifest(const fs::path& dir,const Manifest& m){auto p=dir/Man
  fs::rename(tmp,p);
 #endif
 }
-using Extract=std::function<Bytes(const fs::path&,const std::string&)>;
 struct Installer{
-    fs::path release;Extract extract;unsigned width=1920,height=1080;std::vector<std::string> log;
+    fs::path release;unsigned width=1920,height=1080;std::vector<std::string> log;
     void note(const std::string& s){log.push_back(s);}
     Bytes payload(const std::string& name,const std::string& expected){auto b=read(release/"files"/name);hashIs(b,expected,name);return b;}
     std::map<std::string,Bytes> plan(const fs::path& target,const std::string& preset){
-        require(preset=="D3D11"||preset=="D3D9"||preset=="D3D8","Unsupported x86 preset");
-        safePath(target);require(machine(read(target))==0x14c,"Target must be PE32/x86; x64 targets are not supported");auto dir=target.parent_path();
+        require(preset=="D3D11"||preset=="D3D9","Unsupported x86 preset");
+        safePath(target);require(machine(read(target))==0x14c,"Target must be PE32/x86; x64 targets are not supported");auto dir=installDirectory(target);
         std::map<std::string,Bytes> p;
         auto sums=str(read(release/"payload.sha256"));
         for(auto name:{"dlss5-neural.addon32","dlss5-neural-host64.exe"}){
@@ -151,23 +160,17 @@ struct Installer{
         }
         p["dlssnr_amd_pass1.dll"]=payload("dlssnr_amd_pass1.dll",RuntimeSha);
         p["dlssnr_on_amd_weights.bin"]=payload("dlssnr_on_amd_weights.bin",WeightsSha);
-        if(fs::exists(release/"files/dxgi.dll"))p["dxgi.dll"]=payload("dxgi.dll",ReShadeSha);
-        else {require(fs::exists(dir/"dxgi.dll"),"Install official ReShade 6.8 Full Add-on Support on the DXGI side first, or provide private files/dxgi.dll");auto b=read(dir/"dxgi.dll");hashIs(b,ReShadeSha,"Existing ReShade (requires tested 6.8.0.2156 x86 full-addon binary)");p["dxgi.dll"]=std::move(b);}
-        require(machine(p["dxgi.dll"])==0x14c,"ReShade must be x86");
-        if(preset!="D3D11"){
-            const auto zip=release/"dgVoodoo2_87_4.zip";hashIs(read(zip),ZipSha,"dgVoodoo archive");
-            const std::string file=preset=="D3D8"?"D3D8.dll":"D3D9.dll";
-            auto b=extract(zip,"MS/x86/"+file);hashIs(b,preset=="D3D8"?D8Sha:D9Sha,"dgVoodoo x86 DLL");require(machine(b)==0x14c,"Wrong wrapper architecture");p[lower(file)]=std::move(b);
-            auto conf=dir/"dgVoodoo.conf";safePath(conf);
-            p["dgVoodoo.conf"]=bytes(dgConfig(fs::exists(conf)?str(read(conf)):str(extract(zip,"dgVoodoo.conf"))));
-        }
+        const std::string reshadeName=preset=="D3D9"?"d3d9.dll":"dxgi.dll";
+        if(fs::exists(release/"files/dxgi.dll"))p[reshadeName]=payload("dxgi.dll",ReShadeSha);
+        else {require(fs::exists(dir/reshadeName),"Install official ReShade 6.8 Full Add-on Support for the selected API first, or provide private files/dxgi.dll");auto b=read(dir/reshadeName);hashIs(b,ReShadeSha,"Existing ReShade (requires tested 6.8.0.2156 x86 full-addon binary)");p[reshadeName]=std::move(b);}
+        require(machine(p[reshadeName])==0x14c,"ReShade must be x86");
         auto tuning=dir/"dlss5-neural.ini";safePath(tuning);if(!fs::exists(tuning))p["dlss5-neural.ini"]=bytes(freshIni());
         auto ini=dir/"ReShade.ini";safePath(ini);auto before=fs::exists(ini)?str(read(ini)):std::string();auto after=firstDock(before,width,height);
         if(before!=after)p["ReShade.ini"]=bytes(after);
         return p;
     }
     void install(const fs::path& target,const std::string& preset){
-        auto dir=fs::absolute(target).parent_path();safePath(dir);safePath(dir/ManifestName);
+        auto dir=installDirectory(target);safePath(dir);safePath(dir/ManifestName);
         auto desired=plan(fs::absolute(target),preset);Manifest m;m.preset=preset;
         if(fs::exists(dir/ManifestName)){m=decode(str(read(dir/ManifestName)));require(m.state=="installed","Interrupted transaction: run uninstall/recovery before reinstall");require(m.preset==preset,"Uninstall previous preset before changing API");}
         struct Change{std::string name;Bytes before,after;bool existed;};std::vector<Change> changes;
@@ -196,7 +199,7 @@ struct Installer{
         m.state="installing";atomicManifest(dir,m);
         try{for(auto& c:changes)write(dir/c.name,c.after);m.state="installed";atomicManifest(dir,m);}
         catch(...){for(auto i=changes.rbegin();i!=changes.rend();++i){if(i->existed)write(dir/i->name,i->before);else fs::remove(dir/i->name);}if(hadManifest)write(dir/ManifestName,oldManifest);else fs::remove(dir/ManifestName);throw;}
-        note("Installed "+preset+" x86; ReShade=DXGI; same-frame protocol v2");
+        note("Installed "+preset+" x86; native frontend; same-frame protocol v2");
     }
     void uninstall(const fs::path& directory,bool removeConfigs=false){
         auto dir=fs::absolute(directory);safePath(dir);safePath(dir/ManifestName);require(fs::exists(dir/ManifestName),"No x86 install manifest");auto m=decode(str(read(dir/ManifestName)));std::vector<Entry> keep;

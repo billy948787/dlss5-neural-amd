@@ -1,6 +1,6 @@
 # x86bridge overlay, protocol v2
 
-Generic native D3D11 x86 frontend to the original x64 neural engine. This source update adds the ReShade panel **DLSS Neural Rendering (AMD)** while keeping the 32-bit transport isolated from the existing x64 rendering routes.
+Generic native D3D9/D3D11 x86 frontend to the original x64 neural engine. This source update adds the ReShade panel **DLSS Neural Rendering (AMD)** while keeping the 32-bit transport isolated from the existing x64 rendering routes.
 
 ## Build and install
 
@@ -15,9 +15,9 @@ The script invokes native `Hostx64\x86\cl.exe` and `Hostx64\x64\cl.exe`, C++20, 
 - `build-x86bridge/dlss5-neural.addon32` (x86)
 - `build-x86bridge/dlss5-neural-host64.exe` (x64)
 
-With the application closed, copy **both** files beside its executable, replacing the v1 pair together. Keep existing ReShade x86, `dlss5-neural.ini`, runtime DLLs, weights and runtime directories in place. Do not mix protocol versions. No installer or wrapper changes.
+With the application closed, copy **both** files beside the ReShade proxy that the game actually loads, replacing the v1 pair together. Keep existing ReShade x86, `dlss5-neural.ini`, runtime DLLs, weights and runtime directories in place. Source-engine games commonly use a `bin` subdirectory recorded as `[INSTALL] BasePath` in the root ReShade INI. Do not mix protocol versions.
 
-Open ReShade and the DLSS Neural Rendering (AMD) panel. Initial settings come from the host's original LoadSettings, not frontend defaults. If the effect starts disabled, opening the panel requests synchronization through the next D3D11 Present and the existing helper launch path.
+Open ReShade and the DLSS Neural Rendering (AMD) panel. Initial settings come from the host's original LoadSettings, not frontend defaults. If the effect starts disabled, opening the panel requests synchronization through the next D3D9 or D3D11 Present and the existing helper launch path.
 
 The native x86/x64 build and protocol checks run in GitHub Actions. Live ReShade, GPU and game behavior still require manual validation on supported AMD hardware.
 
@@ -75,7 +75,7 @@ Revision starts at 1 per helper session. SET_STATE must have a strictly greater 
 
 Only OnPresent calls SyncControls: GET_STATE after HELLO, SET_STATE for dirty revision, pending Save/Reload/Measure, periodic STATUS (250 ms), then the existing frame path. This all runs under the existing frontend lock. Existing DROP/QUIT remain serialized lifecycle operations under that same lock. No worker thread or second launch path is introduced.
 
-Frame order is unchanged: capture -> D3D11 FlushAndWait -> FRAME -> original host engine -> WaitForWorkQueue -> ACK -> confirmed same frame copied back. Host Neural/CopyOnly and frontend capture-to-return blocks compare byte-for-byte with the prior contribution. No async, cached output or stale-output fallback; no guide/copy/handle heuristic changes. No game-specific added code.
+The D3D11 frame order remains capture -> D3D11 FlushAndWait -> FRAME -> original host engine -> WaitForWorkQueue -> ACK -> confirmed same frame copied back. Native D3D9 adds an adapter-matched auxiliary D3D11 device around that path. When legacy shared handles are available (normally D3D9Ex), the frame crosses through a private pair of shared GPU resources. Classic D3D9 instead resolves the back buffer, performs a bounded system-memory readback/upload into D3D11, and reverses that staging after ACK. The slower fallback favors compatibility and avoids relying on a translation wrapper. Both APIs use bounded CPU/GPU waits, the exact adapter LUID and no async or stale-output fallback. D3D9 currently transports colour only; game depth and motion-vector discovery remains D3D11-only.
 
 ## Local regression test
 
@@ -85,9 +85,9 @@ Frame order is unchanged: capture -> D3D11 FlushAndWait -> FRAME -> original hos
 4. Test transport-only with existing `DLSS5_X86BRIDGE_TRANSPORT_ONLY=1`; panel must show transport mode and engine controls disabled, result=4. Test resize and helper termination as before.
 5. Send `dlss5-neural-x86.log`, `dlss5-neural-x86-host.log`, build/import/protocol logs from build-x86bridge, and any UI screenshot/error.
 
-No claim of newly validated Windows/GPU UI behavior. D3D11 x86 only; D3D8/D3D9 need an external D3D11 translation wrapper. No native support for those APIs was added.
+Native builds cover D3D9 and D3D11 x86. Live D3D9 interop, fullscreen transitions, MSAA behavior, classic-D3D9 staging performance and GPU/UI behavior still require manual game validation. D3D8 is currently unsupported.
 
 
 ## Incremental update: Factory Defaults and additive installer
 
-See [x86bridge-install.md](x86bridge-install.md). Factory Defaults restores captured upstream tuning in memory with x86 overrides while preserving operational preferences. The separate installer-x86 directory provides generic D3D11/D3D9/D3D8 presets, pinned standalone dgVoodoo and private/public sidecar layouts. Native builds are covered by CI; live game and GPU validation remains manual.
+See [x86bridge-install.md](x86bridge-install.md). Factory Defaults restores captured upstream tuning in memory with x86 overrides while preserving operational preferences. The separate installer-x86 directory provides native D3D11/D3D9 presets and private/public sidecar layouts without dgVoodoo. Native builds are covered by CI; live game and GPU validation remains manual.

@@ -86,7 +86,7 @@ try {
         if($LASTEXITCODE -ne 0){throw "IPC test failed: $arch"}
         if($arch -eq 'x86'){
             $binary=Join-Path $out 'dlss5-neural.addon32'
-            & $cl @flags /LD (Join-Path $root 'src/x86bridge/frontend32.cpp') "/Fo$out\frontend32.obj" /link /DLL "/OUT:$binary" user32.lib d3d11.lib dxgi.lib d3dcompiler.lib 2>&1 | Tee-Object -FilePath (Join-Path $out 'build-x86.log')
+            & $cl @flags /LD (Join-Path $root 'src/x86bridge/frontend32.cpp') "/Fo$out\frontend32.obj" /link /DLL "/OUT:$binary" user32.lib d3d9.lib d3d11.lib dxgi.lib d3dcompiler.lib 2>&1 | Tee-Object -FilePath (Join-Path $out 'build-x86.log')
         }else{
             $binary=Join-Path $out 'dlss5-neural-host64.exe'
             & $cl @flags (Join-Path $root 'src/x86bridge/host64.cpp') "/Fo$out\host64.obj" /link "/OUT:$binary" user32.lib d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib bcrypt.lib 2>&1 | Tee-Object -FilePath (Join-Path $out 'build-x64.log')
@@ -116,7 +116,7 @@ try {
         Copy-Item -LiteralPath (Join-Path $out $name) -Destination (Join-Path $release 'files') -Force
     }
     @('dlss5-neural.addon32','dlss5-neural-host64.exe') | ForEach-Object {"$((Get-FileHash -LiteralPath (Join-Path $release "files/$_") -Algorithm SHA256).Hash.ToLowerInvariant())  $_"} | Set-Content -Encoding ASCII -LiteralPath (Join-Path $release 'payload.sha256')
-    $canTest=(Test-Path (Join-Path $release 'dgVoodoo2_87_4.zip')) -and (Test-Path (Join-Path $release 'files/dxgi.dll')) -and (Test-Path (Join-Path $release 'files/dlssnr_amd_pass1.dll')) -and (Test-Path (Join-Path $release 'files/dlssnr_on_amd_weights.bin'))
+    $canTest=(Test-Path (Join-Path $release 'files/dxgi.dll')) -and (Test-Path (Join-Path $release 'files/dlssnr_amd_pass1.dll')) -and (Test-Path (Join-Path $release 'files/dlssnr_on_amd_weights.bin'))
     if($canTest){
         & $installerTest $release | Tee-Object -FilePath (Join-Path $out 'installer-tests.log')
         if($LASTEXITCODE -ne 0){throw 'Installer tests failed'}

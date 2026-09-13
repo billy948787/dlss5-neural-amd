@@ -25,18 +25,25 @@ int main(int argc,char** argv){try{
     i::Manifest manifest;manifest.preset="D3D11";manifest.entries.push_back({"dlss5-neural.addon32",std::string(64,'a'),"","",true,false});
     check(i::encode(i::decode(i::encode(manifest)))==i::encode(manifest),"manifest canonical roundtrip");
     rejects([&]{i::decode(i::encode(manifest)+"junk");},"modified manifest rejected");
+    i::Manifest legacy;legacy.preset="D3D9";legacy.entries=manifest.entries;auto legacyText=i::encode(legacy);
+    const std::string nativeMarker="\"dgVoodoo\":\"none\"";auto marker=legacyText.find(nativeMarker);i::require(marker!=legacyText.npos,"legacy marker");
+    legacyText.replace(marker,nativeMarker.size(),"\"dgVoodoo\":\"2.87.4\"");
+    check(i::decode(legacyText).preset=="D3D9","legacy D3D9 manifest remains uninstallable");
+    auto redirected=root/"redirected";fs::create_directories(redirected/"bin");auto redirectedExe=redirected/"game.exe";i::write(redirectedExe,pe());
+    i::write(redirected/"ReShade.ini",i::bytes("[INSTALL]\nBasePath=bin\n"));
+    check(i::installDirectory(redirectedExe)==fs::weakly_canonical(redirected/"bin"),"ReShade BasePath child directory honored");
+    i::write(redirected/"ReShade.ini",i::bytes("[INSTALL]\nBasePath=..\n"));
+    rejects([&]{i::installDirectory(redirectedExe);},"ReShade BasePath escape rejected");
     if(argc!=2){std::cout<<"TOTAL PASS="<<passed<<". Core installer tests; pinned payload fixture not supplied.\n";return 0;}
-    fs::path release=fs::absolute(argv[1]);i::Installer app;app.release=release;app.extract=i::extractArchive;
-    for(auto preset:{"D3D11","D3D9","D3D8"}){
+    fs::path release=fs::absolute(argv[1]);i::Installer app;app.release=release;
+    for(auto preset:{"D3D11","D3D9"}){
         auto dir=root/preset;fs::create_directory(dir);auto target=dir/"target.exe";i::write(target,pe());app.install(target,preset);
-        check(i::hashFile(dir/"dxgi.dll")==i::ReShadeSha,"ReShade x86 installed only as DXGI");
+        const bool d3d9=std::string(preset)=="D3D9";const auto reshade=d3d9?"d3d9.dll":"dxgi.dll";
+        check(i::hashFile(dir/reshade)==i::ReShadeSha,"ReShade x86 installed for the native API");
         check(i::getIni(i::str(i::read(dir/"dlss5-neural.ini")),"dlss5","ColourStrength")=="0.25","fresh ColourStrength=0.25");
-        if(std::string(preset)=="D3D11")check(!fs::exists(dir/"d3d8.dll")&&!fs::exists(dir/"d3d9.dll")&&!fs::exists(dir/"dgVoodoo.conf"),"D3D11 receives no dgVoodoo");
-        else {const bool d8=std::string(preset)=="D3D8";check(i::hashFile(dir/(d8?"d3d8.dll":"d3d9.dll"))==(d8?i::D8Sha:i::D9Sha),"wrapper is exact pinned MS/x86 entry");
-            auto conf=i::str(i::read(dir/"dgVoodoo.conf"));check(i::getIni(conf,"DirectX","VideoCard")=="internal3D"&&i::getIni(conf,"DirectX","VRAM")=="4096","dgVoodoo internal3D + VRAM4096");
-            check(i::getIni(conf,"DirectX","dgVoodooWatermark")=="false"&&i::getIni(conf,"DirectX","FastVideoMemoryAccess")=="false","watermark and fast VRAM access disabled");
-            check(i::getIni(conf,"General","OutputAPI")=="d3d11_fl11_0","wrapper output forced to D3D11");
-        }
+        check(!fs::exists(dir/"d3d8.dll")&&!fs::exists(dir/"dgVoodoo.conf"),"native route receives no translation wrapper");
+        if(d3d9)check(!fs::exists(dir/"dxgi.dll"),"native D3D9 uses the D3D9 ReShade proxy");
+        else check(!fs::exists(dir/"d3d9.dll"),"native D3D11 uses the DXGI ReShade proxy");
         auto before=i::read(dir/i::ManifestName);app.install(target,preset);check(i::read(dir/i::ManifestName)==before,"reinstall manifest idempotent");
         i::write(dir/"dlss5-neural.ini",i::bytes("[dlss5]\nColourStrength=0.65\nScale=0.75\n"));auto tuning=i::read(dir/"dlss5-neural.ini");app.install(target,preset);check(i::read(dir/"dlss5-neural.ini")==tuning,"reinstall preserves user tuning byte-for-byte");
         app.uninstall(dir);check(!fs::exists(dir/"dxgi.dll")&&!fs::exists(dir/"dlss5-neural.addon32")&&!fs::exists(dir/"dlss5-neural-host64.exe"),"uninstall removes owned bridge binaries");
@@ -50,11 +57,13 @@ int main(int argc,char** argv){try{
     for(auto& [name,b]:originals)check(i::read(conflict/name)==b,"conflicting DLL/config backup restored exactly");
     auto changed=root/"changed";fs::create_directory(changed);i::write(changed/"target.exe",pe());app.install(changed/"target.exe","D3D11");i::write(changed/"dxgi.dll",i::bytes("user replacement"));app.uninstall(changed);check(i::str(i::read(changed/"dxgi.dll"))=="user replacement","uninstall preserves DLL replaced after install");
     i::write(root/"x64.exe",pe(true));rejects([&]{app.install(root/"x64.exe","D3D11");},"x64 target refused");
+    rejects([&]{app.install(target,"D3D8");},"D3D8 translation preset refused");
     rejects([&]{app.install(target,"D3D12");},"unsupported API refused");
     auto corrupt=root/"corrupt";fs::create_directory(corrupt);fs::create_directory(corrupt/"files");
     for(auto& f:fs::directory_iterator(release/"files"))fs::copy_file(f.path(),corrupt/"files"/f.path().filename());fs::copy_file(release/"payload.sha256",corrupt/"payload.sha256");
-    i::write(corrupt/"dgVoodoo2_87_4.zip",i::bytes("corrupt"));i::Installer bad=app;bad.release=corrupt;
-    rejects([&]{bad.plan(target,"D3D9");},"corrupt wrapper ZIP refused before mutation");
+    i::Installer bad=app;bad.release=corrupt;i::write(corrupt/"files/dxgi.dll",i::bytes("corrupt"));
+    rejects([&]{bad.plan(target,"D3D9");},"corrupt ReShade payload refused before mutation");
+    fs::copy_file(release/"files/dxgi.dll",corrupt/"files/dxgi.dll",fs::copy_options::overwrite_existing);
     i::write(corrupt/"files/dlssnr_amd_pass1.dll",i::bytes("wrong runtime"));rejects([&]{bad.plan(target,"D3D11");},"wrong runtime rejected");
     fs::copy_file(release/"files/dlssnr_amd_pass1.dll",corrupt/"files/dlssnr_amd_pass1.dll",fs::copy_options::overwrite_existing);i::write(corrupt/"files/dlssnr_on_amd_weights.bin",i::bytes("wrong weights"));rejects([&]{bad.plan(target,"D3D11");},"wrong weights rejected");
     std::cout<<"TOTAL PASS="<<passed<<". Filesystem/INI/payload tests; Windows GUI/ReShade live docking/GPU UNVALIDATED.\n";return 0;
