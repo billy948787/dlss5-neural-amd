@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix='x86bridge-tests-') as d:
 #include <cstring>
 using HANDLE=void*;using DWORD=uint32_t;using BOOL=int;
 constexpr BOOL FALSE=0,TRUE=1;const HANDLE INVALID_HANDLE_VALUE=reinterpret_cast<HANDLE>(-1);
-constexpr DWORD INFINITE=0xffffffff,ERROR_IO_PENDING=997,ERROR_TIMEOUT=1460,ERROR_BROKEN_PIPE=109,WAIT_OBJECT_0=0,WAIT_TIMEOUT=258;
+constexpr DWORD INFINITE=0xffffffff,ERROR_IO_PENDING=997,ERROR_TIMEOUT=1460,ERROR_BROKEN_PIPE=109,ERROR_INVALID_DATA=13,WAIT_OBJECT_0=0,WAIT_TIMEOUT=258;
 struct OVERLAPPED{HANDLE hEvent;};
 inline int mode=0,calls=0,cancelled=0,retired=0,closed=0,waited=0;inline DWORD amount=0,lastError=ERROR_IO_PENDING;inline void* target=nullptr;
 inline BOOL CloseHandle(HANDLE){++closed;return 1;}

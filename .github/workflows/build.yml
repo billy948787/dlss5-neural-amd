@@ -11,7 +11,7 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build all three add-ons
         shell: pwsh
@@ -43,7 +43,7 @@ jobs:
   x86-bridge:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build and test x86 bridge
         shell: pwsh
@@ -64,7 +64,7 @@ jobs:
   x86-contracts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Test x86 bridge contracts and control flow
         run: python3 tools/test-x86bridge.py
