@@ -9,28 +9,25 @@ history from chat. Read this file first, then the repository README, changelog a
 - The active repository is **`E:\Projetos\dlss5-neural-amd-gpt-master`**.
 - The active branch is **`x86_testing`**.
 - Remote `origin` is `https://github.com/zmodelerlover/dlss5-neural-amd.git`.
-- At the time of this handoff, `HEAD` is `d51c52e` and the branch is one local commit ahead of
-  `origin/x86_testing`.
 - Do not work in `E:\Projetos\dlss5-neural-amd-gpt`: that old personal-fork directory was deleted.
 - Do not work in `E:\Projetos\dlss-5-nr-amd-gpt-32bits`: it was a temporary checkout used to
   inspect the original 32-bit fork and was also deleted.
-- The worktree is intentionally dirty. It contains useful, uncommitted work for D3D8 and D3D9
-  device-reset recovery. Do not discard the worktree wholesale and do not reset it to `HEAD`.
-- No commit or push was made for the final D3D8/GTA IV/Silent Hill 3 work in this session.
 
-Current intentional source changes relative to `d51c52e`:
+**Updated later on 2026-09-14.** The work this handoff was written to preserve is committed and
+pushed. The worktree is clean and `x86_testing` matches `origin/x86_testing`; the dirty tree the
+original text described was separated into these commits, in this order:
 
-- experimental D3D8 installation through official d3d8to9 v1.15.1;
-- safe chaining with the existing Silent Hill 3 PC Fix (`d3d8.dll` -> `d3d8R.dll`);
-- D3D9 lost-device/reset recovery and HRESULT diagnostics;
-- no D3D9/D3D11 GPU or IPC wait inside the D3D9 Reset callback;
-- installer, package, documentation and regression-test updates for the above;
-- `local-x86-mod-package/` added to `.gitignore`.
+| Commit | Contents |
+|---|---|
+| `b324d57` | D3D9 `Reset`/lost-device recovery and HRESULT diagnostics: the GTA IV Alt+Tab fix |
+| `0346842` | experimental D3D8 preset through pinned d3d8to9, with `d3d8R.dll` chaining, licence and import script |
+| `8515a57` | ignore `local-x86-mod-package/` |
+| `5701dc0` | this handoff |
+| `e6d4ddb` | ignore-rule audit: `release-v*/`, `*.zip`, installer manifests and backups, editor noise |
+| `cfdd1af` | stop ignoring `tools/patch_runtime.py` and `installer/Cargo.lock`, which are not artifacts |
+| `6b273e8` | opt-in stage probe behind `DLSS5_X86BRIDGE_TIMING=1` |
 
-Untracked files that belong to that work and should be reviewed/committed with it:
-
-- `docs/third-party/d3d8to9-LICENSE.md`
-- `tools/import-d3d8to9.ps1`
+Do not push to `master`; continue through feature branches and PRs.
 
 ## 2. Last action and exact rollback state
 
@@ -38,6 +35,9 @@ An experimental classic-D3D9 raster alignment policy was tested after Silent Hil
 sharp 60-to-30 FPS transition between Resolution Scale 0.35 and 0.36. The experiment reduced the
 0.36 neural raster from the requested 691x389 to 683x384 when a dimension was just above a
 32-pixel boundary. It also added per-stage D3D9 timing logs.
+
+**The transition it was chasing has since been explained, and it was not a rendering boundary at
+all.** See section 4.2. Resolving it required no change to this project's code.
 
 The user reported that this made the result worse. That experiment was fully removed from source.
 Do not reintroduce any of these identifiers or behaviors without new evidence:
@@ -179,13 +179,36 @@ experimental forced runtime purge using an undocumented internal function did no
 not retained because it added stability risk.
 
 Do not automatically quantize or silently alter the user's scale. The Silent Hill 3 32-pixel tile
-alignment experiment worsened the result and was reverted. Future work should first separate:
+alignment experiment worsened the result and was reverted.
 
-- game frame pacing;
+**Resolved 2026-09-14: the 0.35/0.36 transition was the game's frame-rate cap, not a raster
+boundary.** Silent Hill 3's PC Fix was running a hard 60 FPS cap (`Silent_Hill_3_PC_Fix.ini`,
+`FPSMode` 1 or 2). Under a hard cap, missing the 16.67 ms deadline does not cost a proportional
+amount of frame rate, it costs the next divisor: 60 becomes a locked 30. Scale 0.36 asks for 5.8%
+more pixels than 0.35, 268,799 against 254,016, which is enough to cross that deadline and nothing
+more. Setting `FPSMode = 4` (unlocked) normalised the frame rate with no change to this project's
+code at all.
+
+Two consequences:
+
+- There is no 32-pixel boundary and nothing special about 0.36. The alignment experiment was
+  solving a problem that did not exist, which is why it cost image quality and bought nothing.
+  Do not attempt raster alignment, quantization or trimming again on this evidence.
+- `FPSMode = 4` disables the PC Fix's own `LimitFPSInStoreroom`, which requires `FPSMode` 1 or 2.
+  That patch locks the hospital storeroom (Mirror Room) to 30 FPS so its visual and audio effects
+  play correctly, so uncapping to fix the bridge's frame budget breaks a later scene. `FPSMode = 1`
+  (ThirteenAG's FPS patch) is worth testing as the setting that keeps both.
+
+The cost itself remains real: the classic D3D9 route pays a fixed CPU round trip that does not
+shrink with Resolution Scale. Measure before changing behaviour, in this order:
+
+- game frame pacing and any game or PC Fix frame-rate cap -- **check this first**; it explained the
+  only performance cliff ever reported here;
 - classic-D3D9 CPU readback/upload cost;
 - neural inference cost;
-- HIP/driver allocation caching;
-- game/PC Fix FPS limiter behavior.
+- HIP/driver allocation caching.
+
+Section 4.5 is the tool for the middle two.
 
 ### 4.3 D3D9 Reset and Alt+Tab
 
@@ -223,6 +246,49 @@ The x86 installer is additive and fail-closed:
 
 The supported x86 ReShade sidecar is ReShade 6.8.0.2156 Full Add-on Support with its pinned hash.
 The installer writes that payload as `dxgi.dll` for D3D11 or `d3d9.dll` for D3D9/D3D8.
+
+### 4.5 Measuring the x86 route
+
+`DLSS5_X86BRIDGE_TIMING=1` turns on an opt-in stage probe in the x86 frontend (commit `6b273e8`).
+It is off by default; the frontend's startup line reports `probe=on`/`probe=off` so a log says
+which it was. Every 120 completed frames it averages one line splitting the bridge into
+`input+prepare`, `host` and `output`, and names the staging path measured.
+
+The probe measures and never participates. It issues no query, flush or wait of its own: all three
+boundaries are synchronisations the frame already performs, so an enabled probe measures the same
+frame that would have run without it. **Preserve that property.** A wait added on this path would
+land inside the `IDirect3DDevice9::Reset` window that section 4.3 exists to keep clear. The
+contract test in `tools/test-x86bridge.py` pins it and also guards that the reverted experiment's
+identifiers stay absent.
+
+Representative classic-D3D9 figures at 1920x1080, from the reverted build's own instrumentation:
+`input+prepare` 2.7 ms, `host` 9.1 ms, `output` 3.3 ms, total 15.0 ms. The reading that matters is
+that `input+prepare` plus `output` is about 6 ms of fixed transport, a full frame crossing
+CPU-visible memory in each direction, and it does not shrink when Resolution Scale drops -- only
+`host` does. Half-Life 2 reaches `shared GPU staging` instead and avoids most of it, which is why
+D3D9Ex promotion is the change worth pursuing rather than saving neural pixels.
+
+### 4.6 Open: D3D9 reference count at process exit
+
+ReShade reports `Reference count for IDirect3DDevice9 ... is inconsistent! Leaking resources` at
+normal process exit on Silent Hill 3 and GTA IV, and not on Half-Life 2. No crash or minidump is
+associated with it. The correlation across the three titles is clean:
+
+| Title | Staging | Final `destroy_swapchain` observed | Reference count |
+|---|---|---|---|
+| Silent Hill 3 | classic CPU-compatible | no | inconsistent |
+| GTA IV | classic CPU-compatible | no | inconsistent |
+| Half-Life 2 | shared GPU | yes | clean |
+
+On GTA IV the warning is timestamped two seconds before the add-on is unregistered, so ReShade
+released the device while the frontend still held references. The classic path is the one that
+creates `readback9` and `upload9`, two `SYSTEMMEM` surfaces the shared path never creates, which
+makes them the first thing to check. A plausible fix direction is to release the D3D9 staging on
+add-on unregister as well, not only in `destroy_swapchain`.
+
+Treat this as unconfirmed. All three frontend logs end abruptly, so the missing teardown line may
+be an unflushed log rather than a callback that never ran; the reference-count warning itself comes
+from ReShade and is independent of that.
 
 ## 5. D3D8 and Silent Hill 3 details
 
@@ -263,9 +329,9 @@ Silent Hill 3 live result before the rejected performance experiment:
 - more than 10,000 frames completed with `result=1 same_frame=1` and no host errors/timeouts;
 - native D3D9 used the classic CPU-compatible staging path, not D3D9Ex shared handles;
 - at 1920x1080, scale 0.35 requested 672x378 and ran near 60 FPS;
-- scale 0.36 requested 691x389 and the game dropped to a locked 30 FPS;
-- network time increased disproportionately at the boundary, but the attempted raster trimming
-  made the actual result worse and was reverted;
+- scale 0.36 requested 691x389 and the game dropped to a locked 30 FPS, later traced to the PC Fix
+  frame-rate cap rather than to anything about the raster; see 4.2;
+- the attempted raster trimming made the actual result worse and was reverted;
 - one startup `IDirect3DDevice9::Reset` returned `D3DERR_INVALIDCALL`, immediately retried and
   recovered;
 - ReShade reported an inconsistent D3D9 reference count at normal process exit; no crash/minidump
@@ -279,9 +345,9 @@ Silent Hill 3 live result before the rejected performance experiment:
 | DOOM Eternal | Vulkan x64 | Works with proper ReShade Full Add-on installation and graphics present queue; use `r_presentFromAsync "0"`; 3,600-frame validation, repeated Alt+Tab, one recovered skip. |
 | Red Dead Redemption 2 | Vulkan x64 | Initially panel appeared but effect did not activate; dynamic Vulkan device fallback/MinHook route fixed it. User confirmed correct operation. |
 | Eden Nintendo Switch emulator | Vulkan x64 | Works. Missing panel was Windows Defender quarantining/deleting the addon, not a code regression. |
-| Half-Life 2 | D3D9 x86 | Works through native D3D9 bridge. ReShade BasePath points to `bin`; binaries/logs that matter are in `Half-Life 2\bin`, not only the root. Host64 packaging/availability was corrected. |
-| GTA IV | D3D9 x86 | Works after Reset/Alt+Tab lifecycle fix. Avoid waits/queries/IPC during `IDirect3DDevice9::Reset`. Transient device-lost frames must not permanently fault the bridge. |
-| Silent Hill 3 | D3D8 x86 | Works through PC Fix -> `d3d8R.dll` d3d8to9 -> ReShade D3D9 -> x86 bridge. Classic staging has a severe 0.35/0.36 performance cliff; attempted raster alignment was rejected and reverted. |
+| Half-Life 2 | D3D9 x86 | Works through native D3D9 bridge. ReShade BasePath points to `bin`; binaries/logs that matter are in `Half-Life 2\bin`, not only the root. Host64 packaging/availability was corrected. Revalidated on the committed tree: 21,600 frames, every frame `result=1`, no faults, one reset handled. Uses `shared GPU staging`, so it exercises the D3D9Ex path the other two titles do not. |
+| GTA IV | D3D9 x86 | Works after Reset/Alt+Tab lifecycle fix. Avoid waits/queries/IPC during `IDirect3DDevice9::Reset`. Transient device-lost frames must not permanently fault the bridge. Revalidated on the committed tree: 15,480 frames, every frame `result=1`, no faults, 20 disable/enable cycles, one reset handled by the deferred path. Classic CPU-compatible staging. |
+| Silent Hill 3 | D3D8 x86 | Works through PC Fix -> `d3d8R.dll` d3d8to9 -> ReShade D3D9 -> x86 bridge. The reported 0.35/0.36 cliff was the PC Fix frame-rate cap, not the bridge: unlocking it (`FPSMode = 4`) normalised the frame rate with no code change. Attempted raster alignment was rejected and reverted. See 4.2, including what `FPSMode = 4` costs in the Mirror Room. |
 | NFS 2015 | D3D11 x64 | Existing documented validation: 1,205 frames, one skip, no failures. |
 | GTA V Enhanced | D3D12 x64 | Existing documented validation: 23,663 frames, no failures; demonstrated stale-residual trail on skipped frames, later fixed by outputting the untouched game frame on skips. |
 | RPCS3 | Vulkan x64 | Existing documented validation: full bridge round trip. Static `vkCreateDevice` import is compatible. |
@@ -407,17 +473,22 @@ artifacts and logs.
 
 ## 9. Recommended next steps
 
-1. Review the dirty diff; keep D3D8 and GTA IV reset fixes separated into understandable commits.
-2. Obtain the official d3d8to9 v1.15.1 release asset, import it through the pinned script and run
-   the full D3D8 installer fixture (including chaining/uninstall tests).
-3. Re-test GTA IV and Half-Life 2 after any D3D9 lifecycle change: enable, disable/re-enable,
-   Alt+Tab, fullscreen/windowed, resize and normal Alt+F4 exit.
-4. Keep Silent Hill 3 on the restored pair until there is a measurement-led alternative. Do not
-   silently change the scale/raster. If profiling it, gather CPU staging, GPU inference and game
-   pacing separately without changing behavior first.
-5. Investigate D3D9Ex promotion/shared-handle feasibility for true D3D8/D3D9 games. Eliminating the
-   classic CPU round trip is more promising than shaving a few neural pixels, but compatibility
-   must be proven.
+Items 1 and 3 of the original list are done: the dirty diff was separated into the commits listed
+in section 1, and GTA IV and Half-Life 2 were revalidated on the committed tree (section 6).
+
+1. Obtain the official d3d8to9 v1.15.1 release asset, import it through the pinned script and run
+   the full D3D8 installer fixture (including chaining/uninstall tests). Until then the D3D8
+   install plan fails closed and those fixture cases are skipped, which is the expected result.
+2. Investigate D3D9Ex promotion/shared-handle feasibility for true D3D8/D3D9 games. This is now the
+   highest-value performance item: section 4.5 puts about 6 ms of fixed CPU round trip on the
+   classic path, Half-Life 2 already proves the shared path works, and no amount of neural-pixel
+   shaving reaches that cost. Compatibility must still be proven, and for D3D8 it depends on what
+   d3d8to9 creates.
+3. Quantify before optimising. With `DLSS5_X86BRIDGE_TIMING=1` and no frame-rate cap in the way,
+   run one title at several Resolution Scales: `input+prepare` and `output` should stay flat while
+   only `host` grows. That turns the D3D9Ex decision into a number.
+4. Do not silently change the user's scale or raster. Section 4.2 is the record of why.
+5. Confirm or dismiss the D3D9 reference-count observation in section 4.6.
 6. Treat reliable Vulkan depth as a separate capture/discovery project; do not enable a switch that
    has no real resource behind it.
 7. Before committing, run `git diff --check`, the full x86 build above and the main x64 checks. Do
