@@ -29,9 +29,11 @@ dlss5-runtime-v*/
 *.ppm
 *.raw
 
-# One-off scripts, no value to anyone cloning
-patch_*.py
-check_ppm.py
+# One-off scratch scripts at the repository root, no value to anyone cloning. Anchored to the
+# root on purpose: unanchored, patch_*.py matches at any depth and shadowed
+# tools/patch_runtime.py, which the README documents as the way to rebuild the runtime.
+/patch_*.py
+/check_ppm.py
 
 # Whatever the x86 installer writes into a directory it manages, plus the manual backup
 # folders used while validating a game by hand. None of it is source.
