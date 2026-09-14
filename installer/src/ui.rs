@@ -80,7 +80,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     field_pane(
         f,
         rows[3],
-        " 1. Runtime + weights  (from #files on the DLSS-NR-AMD Discord) ",
+        " 1. Release folder, or the runtime + weights folder ",
         &app.runtime_dir,
         app.focus == Focus::RuntimeDir,
     );
@@ -176,7 +176,7 @@ fn target_pane(f: &mut Frame, area: Rect, app: &App) {
 
 fn field_pane(f: &mut Frame, area: Rect, title: &str, value: &str, focused: bool) {
     let empty_hint = if title.contains("Runtime") {
-        "paste the folder holding dlssnr_amd_pass1.dll and dlssnr_on_amd_weights.bin  (Ctrl+V)"
+        "paste the folder you unzipped: a release folder, or one holding the runtime and weights  (Ctrl+V)"
     } else {
         "paste the folder the .exe runs from  (Ctrl+V)"
     };

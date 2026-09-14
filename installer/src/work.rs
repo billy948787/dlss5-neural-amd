@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 /// install an add-on from a different release than the one it was built beside.
 pub const ADDON: &[u8] = include_bytes!("../../build/dlss5-neural.addon64");
 pub const ADDON_NAME: &str = "dlss5-neural.addon64";
+#[cfg(test)]
+const ADDON32: &str = "dlss5-neural.addon32";
+#[cfg(test)]
+const HOST64: &str = "dlss5-neural-host64.exe";
 
 pub const RUNTIME_NAME: &str = "dlssnr_amd_pass1.dll";
 pub const WEIGHTS_NAME: &str = "dlssnr_on_amd_weights.bin";
@@ -252,6 +256,21 @@ fn resolve_target(raw: &str) -> PathBuf {
     PathBuf::from(raw.trim().trim_matches('"'))
 }
 
+/// Field 1 takes either shape of folder, so one field means one thing on both routes.
+///
+/// A release folder keeps its payloads in `files\`, and it already carries the runtime and the
+/// weights, so it serves the x64 route too. A folder holding just the two unzipped files is what
+/// this screen has always asked for and still works. Whichever was given, this is where the x64
+/// route reads its payloads from.
+pub fn payload_dir(source: &Path) -> PathBuf {
+    let nested = source.join("files");
+    if nested.join(RUNTIME_NAME).is_file() || nested.join(WEIGHTS_NAME).is_file() {
+        nested
+    } else {
+        source.to_path_buf()
+    }
+}
+
 fn resolve_source(raw: &str) -> PathBuf {
     let p = PathBuf::from(raw.trim().trim_matches('"'));
     if p.is_file() {
@@ -436,8 +455,9 @@ pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
         report.err(format!("Field 1: {} is not a folder.", src.display()));
     } else {
         let mut all_there = true;
+        let payloads = payload_dir(&src);
         for (name, want) in [(RUNTIME_NAME, RUNTIME_SIZE), (WEIGHTS_NAME, WEIGHTS_SIZE)] {
-            match engine::size_of(&src.join(name)) {
+            match engine::size_of(&payloads.join(name)) {
                 None => {
                     report.err(format!("{name} is not in that folder."));
                     all_there = false;
@@ -701,8 +721,9 @@ pub fn install(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     } else if !src.is_dir() {
         report.err(format!("{} is not a folder.", src.display()));
     } else {
+        let payloads = payload_dir(&src);
         for (name, want) in [(RUNTIME_NAME, RUNTIME_SHA), (WEIGHTS_NAME, WEIGHTS_SHA)] {
-            if let Some(bytes) = verified_payload(&src, name, want, &mut report) {
+            if let Some(bytes) = verified_payload(&payloads, name, want, &mut report) {
                 files.insert(name.to_string(), bytes);
             }
         }
@@ -1062,6 +1083,76 @@ mod tests {
         b[152] = (magic & 0xff) as u8;
         b[153] = (magic >> 8) as u8;
         b
+    }
+
+    /// The bridge route end to end against the real release, including the case Silent Hill 3
+    /// actually is: a game that already ships its own d3d8.dll wrapper, which must survive.
+    ///
+    /// Set DLSS5_TEST_RELEASE_DIR to the release folder (the one holding files\ and
+    /// payload.sha256). Skipped otherwise, because the payloads are private and 147 MB.
+    #[test]
+    fn a_real_x86_round_trip_through_the_release_folder() {
+        let Ok(release) = std::env::var("DLSS5_TEST_RELEASE_DIR") else {
+            eprintln!("skipped: set DLSS5_TEST_RELEASE_DIR to the x86 release folder");
+            return;
+        };
+        let has_d3d8to9 = PathBuf::from(&release).join("files/d3d8to9.dll").is_file();
+
+        let game = temp("x86-real");
+        let exe = game.join("game.exe");
+        fs::write(&exe, pe_bytes(false)).unwrap();
+        // A maintained wrapper that forwards to d3d8R.dll, the shape the PC Fix has.
+        let wrapper = {
+            let mut b = pe_bytes(false);
+            b.extend_from_slice(b"d3d8R.dll");
+            b
+        };
+        if has_d3d8to9 {
+            fs::write(game.join("d3d8.dll"), &wrapper).unwrap();
+        }
+        // ReShade has to already be there, since the public release carries no proxy.
+        let reshade = PathBuf::from(&release).join("files/dxgi.dll");
+        let preset = if has_d3d8to9 { Preset::X86Dx8 } else { Preset::X86Dx11 };
+        if !reshade.is_file() && preset == Preset::X86Dx11 {
+            eprintln!("skipped: no ReShade sidecar in the release folder");
+            return;
+        }
+
+        let report = install(exe.to_str().unwrap(), &release, preset);
+        assert!(!report.failed, "{}", report.to_log("x86 real"));
+
+        assert!(game.join(ADDON32).is_file(), "the 32-bit frontend was not installed");
+        assert!(game.join(HOST64).is_file(), "the 64-bit helper was not installed");
+        let manifest = game.join(engine::MANIFEST_NAME);
+        assert!(manifest.is_file(), "the bridge route must journal what it did");
+        let m = engine::decode(&String::from_utf8(fs::read(&manifest).unwrap()).unwrap()).unwrap();
+        assert_eq!(m.route, engine::Route::X86);
+
+        if has_d3d8to9 {
+            assert_eq!(
+                fs::read(game.join("d3d8.dll")).unwrap(),
+                wrapper,
+                "the game's own wrapper must survive byte for byte"
+            );
+            assert!(game.join("d3d8R.dll").is_file(), "the translator goes beside it");
+        }
+
+        // Running it twice is what a person does when they are not sure it worked.
+        let again = install(exe.to_str().unwrap(), &release, preset);
+        assert!(!again.failed, "{}", again.to_log("x86 reinstall"));
+
+        let removed = uninstall(exe.to_str().unwrap(), preset);
+        assert!(!removed.failed, "{}", removed.to_log("x86 uninstall"));
+        assert!(!game.join(ADDON32).exists(), "uninstall left the frontend behind");
+        assert!(!game.join(HOST64).exists());
+        if has_d3d8to9 {
+            assert_eq!(
+                fs::read(game.join("d3d8.dll")).unwrap(),
+                wrapper,
+                "uninstall must not touch the wrapper it never owned"
+            );
+            assert!(!game.join("d3d8R.dll").exists(), "the translator was ours to remove");
+        }
     }
 
     #[test]

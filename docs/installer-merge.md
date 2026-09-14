@@ -146,9 +146,11 @@ it:
 - The 32-bit route still needs the executable, not the folder, because it verifies the header before
   it plans. A folder holding exactly one 32-bit executable is unambiguous and is accepted; more than
   one is a question.
-- Field 1 means the release folder on the x86 route and the runtime folder on the x64 one. That is
-  the seam decision 1 closes, and it is the last thing left before the two routes look like one
-  tool.
+- Field 1 used to mean the release folder on one route and the runtime folder on the other. It now
+  takes either shape: a release folder already carries the runtime and the weights in `files\`, so
+  it serves both, and a folder holding just the two unzipped files still works as it always did.
+  That closes the seam without forcing decision 1 yet, which is about the coupling guarantee rather
+  than about this field.
 
 1. Port `core.h` into Rust as the single install engine — manifest, backups, journal, ownership,
    safe path handling, PE check, BasePath. Port `tests.cpp` alongside it; keep the existing Rust
@@ -159,7 +161,11 @@ it:
 3. Fold the preflight in front of both routes.
 4. Replace the preset list with detected bitness plus the reduced API list, keeping PCSX2 and RPCS3
    as named targets.
-5. Retire `installer-x86/`, and keep one release artifact.
+5. Retire `installer-x86/`, and keep one release artifact. **Do this only after the Rust bridge
+   route has been used on a real game.** Until then the C++ tool is the fallback, and deleting a
+   fallback before its replacement has been proven in the field is the wrong order. It is still
+   built by `build-x86bridge.ps1`, packaged by `tools/package-x86-release.ps1` and published by CI,
+   so retiring it is four edits and a directory removal once that is done.
 
 Steps 1 to 3 are invisible to the user and independently verifiable. Only step 4 changes the flow,
 which is the right order: the risky part ships last, on top of an engine already proven.
