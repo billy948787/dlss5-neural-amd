@@ -313,12 +313,18 @@ Production installer expectations:
 - license: `docs/third-party/d3d8to9-LICENSE.md`;
 - d3d8to9 may require the legacy `d3dx9_43.dll` DirectX runtime.
 
-The official release asset could not be downloaded directly in the local environment. For the
-manual Silent Hill 3 test, d3d8to9 was compiled locally from the exact pinned source commit. That
-local build has SHA-256
-`EE9B4916304592A31F0882F339BCBEAC7133439A297FBD5274E503C0147D209E`, which intentionally does
-not satisfy the production installer's official-release hash. Do not weaken the production hash
-check to accept arbitrary local builds.
+**The official release asset has since been imported.** It was fetched from the upstream release,
+verified as a 124,416-byte PE32/i386 image whose SHA-256 matches the pinned constant, and imported
+through `tools/import-d3d8to9.ps1`. It now sits at `release/files/d3d8to9.dll`, which is git-ignored:
+the payload stays out of the repository and out of public packages, and only the BSD-2-Clause
+attribution is tracked.
+
+The earlier manual Silent Hill 3 test used a d3d8to9 compiled locally from the pinned source commit.
+That local build has SHA-256
+`EE9B4916304592A31F0882F339BCBEAC7133439A297FBD5274E503C0147D209E`, which intentionally does not
+satisfy the production installer's official-release hash, and it is still what the game directory
+carries as `d3d8R.dll`. Installing through the installer replaces it with the official binary. Do
+not weaken the production hash check to accept arbitrary local builds.
 
 Silent Hill 3 live result before the rejected performance experiment:
 
@@ -452,9 +458,10 @@ This builds/tests:
 - x86 installer and synthetic filesystem tests;
 - current integrated addon64 from the same checkout.
 
-Expected current result without a private official d3d8to9 sidecar: 50 installer tests pass and the
-D3D8 install plan fails closed because the pinned payload is absent. Live ReShade docking,
-D3D8 translation and GPU/game behavior remain manual tests.
+Expected result with the pinned d3d8to9 sidecar present: 63 installer tests pass, including the
+D3D8 install path, `d3d8R.dll` chaining, chained uninstall and rejection of a wrong sidecar.
+Without that payload the count is 50 and the D3D8 install plan fails closed, which is also correct.
+Live ReShade docking, D3D8 translation and GPU/game behavior remain manual tests.
 
 Main x64 targets use:
 
@@ -480,9 +487,10 @@ artifacts and logs.
 Items 1 and 3 of the original list are done: the dirty diff was separated into the commits listed
 in section 1, and GTA IV and Half-Life 2 were revalidated on the committed tree (section 6).
 
-1. Obtain the official d3d8to9 v1.15.1 release asset, import it through the pinned script and run
-   the full D3D8 installer fixture (including chaining/uninstall tests). Until then the D3D8
-   install plan fails closed and those fixture cases are skipped, which is the expected result.
+1. Install Silent Hill 3 through the x86 installer's D3D8 preset now that the pinned sidecar is
+   present, and confirm live what the fixture only proves synthetically: the PC Fix `d3d8.dll` is
+   preserved, the official translator lands as `d3d8R.dll`, the panel appears and uninstall puts
+   the wrapper back. The game currently carries the locally compiled translator instead.
 2. Investigate D3D9Ex promotion/shared-handle feasibility for true D3D8/D3D9 games. This is now the
    highest-value performance item: section 4.5 puts about 6 ms of fixed CPU round trip on the
    classic path, Half-Life 2 already proves the shared path works, and no amount of neural-pixel
