@@ -2,6 +2,38 @@
 
 **THIS IS A PROOF-OF-CONCEPT, NOT EVEN CLOSE TO FINAL VERSION, FORK IT, SHARE IT, LETS GROW TOGETHER**
 
+## v0.5.0
+
+**32-bit games work now.** A 32-bit game cannot load the 64-bit runtime at all, so the add-on runs
+as a pair instead: a 32-bit frontend inside the game and a 64-bit helper beside it, sharing frames
+on the same adapter and handing the finished frame back in the same frame. D3D11, D3D9 and — through
+the pinned d3d8to9 translator — D3D8 all reach the network this way. It is experimental, and the
+classic D3D9 path pays a fixed few milliseconds a frame that no Resolution Scale can reduce; see
+[the x86 bridge design](docs/x86bridge.md).
+
+Validated live on Half-Life 2 and GTA IV over roughly 37,000 frames without a failure, and on
+Silent Hill 3 through D3D8.
+
+**One installer, for both architectures.** There used to be two: this one, and a separate build for
+32-bit games. There is one now, and it works out which you have by reading the executable rather
+than asking you to know. It offers only the presets that can work for that width, says which
+executable it read, and refuses rather than guesses when a folder holds a 32-bit launcher beside a
+64-bit game.
+
+It also records what it did. An install now writes a manifest of what it installed, what it
+displaced and where the backup went, so uninstall puts things back instead of deleting filenames it
+recognises — and nothing is written at all until every payload, the target folder and every file it
+is about to touch have passed. A game left running stops the install before the first byte rather
+than halfway through a copy.
+
+**`DLSS5_X86BRIDGE_TIMING=1` measures where a frame goes** on the 32-bit routes, splitting the
+bridge into capture, network and return. It is off by default and adds no work of its own. It
+exists because the one performance cliff ever reported here turned out to be a frame-rate cap in
+the game, not the bridge, and guessing had already cost one reverted experiment.
+
+**Nothing changed for D3D11, D3D12 or Vulkan games** beyond the installer. Same add-on, same
+runtime, same pinned v0.2.17 weights.
+
 ## v0.4.1
 
 **Native Vulkan games are now part of the validation set.** The Vulkan route now rejects
@@ -36,8 +68,8 @@ ReShade add-on that runs the DLSS-NR network on AMD cards.
 
 ## Experimental 32-bit bridge
 
-The `x86_testing` branch is integrating a native 32-bit D3D9/D3D11 ReShade frontend with a
-separate 64-bit neural host. A 32-bit game cannot load the 64-bit HIP runtime directly, so the
+Shipped in v0.5.0: a native 32-bit D3D9/D3D11 ReShade frontend with a separate 64-bit neural
+host. A 32-bit game cannot load the 64-bit HIP runtime directly, so the
 frontend shares frame textures with the helper on the same GPU adapter and receives the completed
 frame back. D3D9 crosses a private D3D9/D3D11 interop stage before using the same host protocol:
 D3D9Ex uses shared GPU textures, while classic D3D9 uses a bounded CPU-compatible staging fallback.

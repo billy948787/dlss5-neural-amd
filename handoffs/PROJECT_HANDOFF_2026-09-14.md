@@ -533,8 +533,8 @@ in section 1, and GTA IV and Half-Life 2 were revalidated on the committed tree 
    only `host` grows. That turns the D3D9Ex decision into a number.
 4. Do not silently change the user's scale or raster. Section 4.2 is the record of why.
 5. Confirm or dismiss the D3D9 reference-count observation in section 4.6.
-6. Treat reliable Vulkan depth as a separate capture/discovery project; do not enable a switch that
-   has no real resource behind it.
+6. Everything that does not block a release now lives in section 11, so it stays visible instead of
+   being rediscovered.
 7. Before committing, run `git diff --check`, the full x86 build above and the main x64 checks. Do
    not push to `master`; continue through feature branches and PRs as the user requested.
 
@@ -549,4 +549,61 @@ in section 1, and GTA IV and Half-Life 2 were revalidated on the committed tree 
 - `src/x86bridge/frontend32.cpp` — native x86 capture/staging/lifecycle code.
 - `src/x86bridge/host64.cpp` — x64 helper and engine integration.
 - `src/neural/vk_route.inc` — native Vulkan transport/discovery/lifecycle.
+
+## 11. Roadmap: known work that does not block a release
+
+None of this stops a game from running. It is collected here so it stays visible instead of being
+rediscovered, and ordered by what the evidence says is worth doing first rather than by how easy it
+would be.
+
+### Worth doing first, because it is measured
+
+**Promote the classic D3D9 route to D3D9Ex.** Section 4.5 puts the transport at 5.55 ms a frame,
+measured, and independent of the neural cost: `host` swung 4.1x across the same run while transport
+moved half a millisecond. That is roughly 36% of a 60 FPS budget spent only moving pixels, and it
+does not shrink when Resolution Scale drops, so the route has a floor no tuning reaches. Half-Life 2
+already takes the shared-GPU path and does not pay it.
+
+How much of the 5.55 ms this actually recovers is unmeasured. The probe names the staging path on
+its own line, so a promoted title answers it directly. For D3D8 it depends on what d3d8to9 creates,
+which is the part to establish first.
+
+**Quantify before optimising anything else.** With `DLSS5_X86BRIDGE_TIMING=1` and no frame-rate cap
+in the way, run one title at several Resolution Scales: `input+prepare` and `output` should stay
+flat while only `host` grows. Section 4.2 is the record of what guessing cost last time.
+
+### Open questions, not yet defects
+
+**The D3D9 reference count at process exit (4.6).** Correlates cleanly across three titles -- both
+classic-staging games leak, the D3D9Ex one does not -- with a concrete suspect in `readback9` and
+`upload9`. Explicitly unconfirmed: all three logs end abruptly, so the missing teardown line may be
+an unflushed log rather than a callback that never ran. Confirm or dismiss before acting on it.
+
+**Reliable depth on Vulkan.** A separate capture and discovery project. Do not enable a switch that
+has no real resource behind it.
+
+### Installer, after the merge
+
+The merge itself is finished; `docs/installer-merge.md` is the record. What it deliberately left:
+
+**Externalise the embedded add-on.** Decision 1 of that document: all payloads external with pinned
+hashes, so coupling is proved by hash rather than by `include_bytes!`. It changes what a release
+ships, so it is worth doing on purpose rather than as a side effect.
+
+**Stream payloads instead of reading them whole.** The engine loads every payload into memory,
+inherited from the C++ design. The 147 MB of weights make a full round trip take about 78 seconds.
+
+**Tighten what the manifest proves.** Editing `owned` or a recorded hash still survives the
+round-trip check, faithfully ported from `core.h` and documented by a test that asserts the current
+behaviour rather than the desired one. The blast radius is bounded by the allowed-name set and by
+uninstall re-hashing before it acts. Changing it changes the manifest format.
+
+**The Win32 GUI.** It went with the C++ installer. `installer/Cargo.toml` already depends on
+`windows-sys`, so adding the `Win32_Graphics_Gdi` and `Win32_UI_WindowsAndMessaging` features would
+let that paint code be ported onto the same engine if the GUI is wanted back.
+
+### Housekeeping
+
+`patch_*.py` in `.gitignore` is anchored to the root now, but a file recreated under a name it
+matches would still vanish silently. The rule exists for scratch scripts that no longer exist.
 

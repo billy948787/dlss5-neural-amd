@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Experimental x86 bridge
+## v0.5.0 — 2026-09-14 — The 32-bit bridge, D3D8, and one installer
 
 - Add native 32-bit D3D9 and D3D11 ReShade frontends and a separate 64-bit host that reuses the
   existing neural engine and HIP runtime on the game's exact adapter.
@@ -52,6 +52,14 @@
   Resolution Scale; only `host` does. The probe issues no query, flush or wait of its own and reads
   only boundaries the frame already crosses, keeping it out of the `IDirect3DDevice9::Reset`
   window. It exists so the classic-D3D9 cost is separated before any behaviour is changed.
+
+## v0.4.2 — Native Vulkan compatibility and lifecycle stability
+
+Tagged and published on 2026-09-12 without a section here, which is why this one is written from
+its commits rather than from notes taken at the time: native Vulkan compatibility and add-on
+lifecycle stability, resolution-scaling stability, and a MinHook linkage fix in the `framecheck`
+build. The lifecycle work spans the v0.4.1 entry below, so read the two together rather than
+assuming the boundary is clean.
 
 ## v0.4.1 — Native Vulkan game stability
 
