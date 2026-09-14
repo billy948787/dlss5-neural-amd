@@ -8,6 +8,7 @@
 #![windows_subsystem = "console"]
 
 mod diag;
+mod engine;
 mod logo;
 mod ui;
 mod work;
