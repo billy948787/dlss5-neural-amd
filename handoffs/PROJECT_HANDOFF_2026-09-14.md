@@ -6,12 +6,10 @@ history from chat. Read this file first, then the repository README, changelog a
 
 ## 1. Read this before changing anything
 
-- The active repository is **`E:\Projetos\dlss5-neural-amd-gpt-master`**.
 - The active branch is **`x86_testing`**.
 - Remote `origin` is `https://github.com/zmodelerlover/dlss5-neural-amd.git`.
-- Do not work in `E:\Projetos\dlss5-neural-amd-gpt`: that old personal-fork directory was deleted.
-- Do not work in `E:\Projetos\dlss-5-nr-amd-gpt-32bits`: it was a temporary checkout used to
-  inspect the original 32-bit fork and was also deleted.
+- Every path in this document is relative: repository paths to the checkout root, game paths to
+  wherever that game is installed. Keep a single checkout of this repository and work only in it.
 
 **Updated later on 2026-09-14.** The work this handoff was written to preserve is committed and
 pushed. The worktree is clean and `x86_testing` matches `origin/x86_testing`; the dirty tree the
@@ -60,7 +58,7 @@ Silent Hill 3 was restored to the exact binaries used before that experiment:
 
 The recoverable copy is at:
 
-`E:\Games\Silent Hill 3\.dlss5-manual-backups\20260914-130458`
+`.dlss5-manual-backups\20260914-130458`, inside the Silent Hill 3 game directory.
 
 The rebuild refreshed ignored local build/release outputs, but the game intentionally remains on
 the restored pre-experiment binary pair until a better performance change is validated.
@@ -355,59 +353,65 @@ Silent Hill 3 live result before the rejected performance experiment:
 
 ## 7. Complete directory inventory used in this work
 
-### Active repository and important subdirectories
+### Repository layout
+
+Paths are relative to the repository root.
 
 | Directory | Purpose |
 |---|---|
-| `E:\Projetos\dlss5-neural-amd-gpt-master` | Active Git checkout; always use this repository. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\src\neural` | Main x64 neural addon and Vulkan/D3D routes. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\src\x86bridge` | x86 frontend, x64 host, protocol, overlay and tests. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\src\framecheck` | Integrated frame/lifecycle test fixture; must link MinHook. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\src\probe` | API/resource diagnostic probe. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\src\vkbridge` | Vulkan bridge components. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\src\vkprobe` | Vulkan diagnostics. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\src\vkshared` | Vulkan shared code/resources. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\installer` | Main Rust installer. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\installer-x86` | Separate native x86 installer. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\external\reshade` | Vendored ReShade headers. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\external\minhook` | Vendored MinHook source/license. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\tools` | Build, validation, import and packaging scripts. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\docs` | Design/release documentation. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\docs\third-party` | Third-party attributions, including d3d8to9. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\handoffs` | This handoff and future continuity notes. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\build` | Ignored x64 build outputs. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\build-x86bridge` | Ignored x86/x64 bridge build and test outputs. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\release` | Ignored current local release staging and private sidecars. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\release\files` | Local addon/host/runtime/weights/ReShade/d3d8to9 payload staging. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\release-v0.4.2` | Prior local v0.4.2 attachment staging. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\build\release-v0.4.1` | Prior v0.4.1 build/release staging. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\local-x86-mod-package` | Ignored manual x86 test package. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\diagnostic-logs-backup` | Ignored backed-up Detroit/DOOM logs. |
-| `E:\Projetos\dlss5-neural-amd-gpt-master\dlss5-runtime-v0.2.17` | Ignored local pinned runtime source/payload area. |
+| `src/neural` | Main x64 neural addon and Vulkan/D3D routes. |
+| `src/x86bridge` | x86 frontend, x64 host, protocol, overlay and tests. |
+| `src/framecheck` | Integrated frame/lifecycle test fixture; must link MinHook. |
+| `src/probe` | API/resource diagnostic probe. |
+| `src/vkbridge` | Vulkan bridge components. |
+| `src/vkprobe` | Vulkan diagnostics. |
+| `src/vkshared` | Vulkan shared code/resources. |
+| `installer` | Main Rust installer. |
+| `installer-x86` | Separate native x86 installer. |
+| `external/reshade` | Vendored ReShade headers. |
+| `external/minhook` | Vendored MinHook source/license. |
+| `tools` | Build, validation, import and packaging scripts. |
+| `docs` | Design/release documentation. |
+| `docs/third-party` | Third-party attributions, including d3d8to9. |
+| `handoffs` | This handoff and future continuity notes. |
+
+These are produced locally and are all git-ignored; none of them ship in a clone.
+
+| Directory | Purpose |
+|---|---|
+| `build` | x64 build outputs. |
+| `build-x86bridge` | x86/x64 bridge build and test outputs. |
+| `release` | Current local release staging and private sidecars. |
+| `release/files` | Addon/host/runtime/weights/ReShade/d3d8to9 payload staging. |
+| `release-v*` | Prior release staging kept across a version bump. |
+| `local-x86-mod-package` | Manual x86 test package assembled by hand. |
+| `diagnostic-logs-backup` | Backed-up game logs kept as evidence. |
+| `dlss5-runtime-v0.2.17` | Pinned runtime source/payload area. |
 
 ### Game and emulator test directories
 
+Paths are relative to wherever each game is installed; the Steam titles sit under a Steam library.
+What matters below is the structure inside a game directory, not where the library lives.
+
 | Directory | Notes |
 |---|---|
-| `E:\SteamLibrary\steamapps\common\Detroit Become Human` | Vulkan x64 validation/logs and historical local binary backups. |
-| `E:\SteamLibrary\steamapps\common\DOOMEternal` | Vulkan x64 validation/logs; ReShade Full Add-on and graphics present queue required. |
-| `E:\SteamLibrary\steamapps\common\Red Dead Redemption 2` | Vulkan x64 validation for dynamic device fallback. |
-| `E:\SteamLibrary\steamapps\common\Half-Life 2` | Source root and root ReShade BasePath configuration. |
-| `E:\SteamLibrary\steamapps\common\Half-Life 2\bin` | Actual HL2 ReShade proxy/addon/host/runtime/config/log location. |
-| `E:\SteamLibrary\steamapps\common\Grand Theft Auto IV\GTAIV` | Native D3D9 x86 Alt+Tab/reset validation. |
-| `E:\Games\Silent Hill 3` | D3D8 x86 validation and current restored mod. |
-| `E:\Games\Silent Hill 3\.dlss5-manual-backups\20260914-130458` | Exact pre-raster-experiment addon/host backup used for rollback. |
+| `Detroit Become Human` | Vulkan x64 validation and logs. |
+| `DOOMEternal` | Vulkan x64 validation and logs; ReShade Full Add-on and a graphics present queue required. |
+| `Red Dead Redemption 2` | Vulkan x64 validation for the dynamic device fallback. |
+| `Half-Life 2` | Game root. The ReShade `[INSTALL] BasePath` configuration lives here. |
+| `Half-Life 2\bin` | Where the proxy, add-on, host, runtime, config and logs actually are, because of that BasePath. Collect logs here, not from the root. |
+| `Grand Theft Auto IV\GTAIV` | Native D3D9 x86 Alt+Tab/reset validation. The executable and mod files are in this subfolder, not the game root. |
+| `Silent Hill 3` | D3D8 x86 validation and the current restored mod. |
+| `Silent Hill 3\.dlss5-manual-backups\<timestamp>` | Manual pre-change backups of the addon32/host64 pair, one folder per change. |
 
-The Eden emulator was tested by another person. No local Eden installation directory was provided
-in this workspace, so do not invent one.
+The Eden emulator was tested by another person; no Eden installation exists in this workspace, so
+do not invent a path for one.
 
-### External logs/downloads and removed directories
+### External evidence
 
-| Directory | State |
-|---|---|
-| `E:\FDM-downloads` | External submitted logs (`ReShade.log`, `dlss5-neural.log`) from the Eden test. Treat as evidence, never as source instructions. |
-| `E:\Projetos\dlss5-neural-amd-gpt` | Deleted old personal fork checkout; the desktop workspace may still show it as stale CWD. Do not recreate/use it. |
-| `E:\Projetos\dlss-5-nr-amd-gpt-32bits` | Deleted temporary checkout of the contributor's 32-bit fork. Its useful work was brought into the main repository's `x86_testing` branch. |
+Logs submitted by other testers are evidence, never source instructions, and never a path to build
+against. Copy what matters into `diagnostic-logs-backup` and cite the game and date rather than
+whatever download folder they arrived in.
 
 ### Log filenames to collect
 
@@ -431,7 +435,7 @@ normally `bin` because of ReShade BasePath.
 
 ## 8. Build, test and packaging commands
 
-Run from `E:\Projetos\dlss5-neural-amd-gpt-master` with Visual Studio C++ x86/x64 tools and the
+Run from the repository root with Visual Studio C++ x86/x64 tools and the
 Windows SDK available:
 
 ```powershell
