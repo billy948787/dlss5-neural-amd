@@ -30,6 +30,13 @@
   and resets history on recovery, instead of permanently faulting the bridge.
 - Add an experimental D3D8 preset through the official, hash-pinned d3d8to9 compatibility layer.
   It translates D3D8 to the native D3D9 frontend and does not restore the old dgVoodoo route.
+- Add an opt-in x86 stage probe behind `DLSS5_X86BRIDGE_TIMING=1`, off by default. It splits the
+  bridge into `input+prepare`, `host` and `output` and averages one line per 120 completed frames,
+  naming the staging path measured. On classic D3D9 the input and output stages are a full frame
+  crossing CPU-visible memory each way, so their sum is roughly fixed and does not shrink with
+  Resolution Scale; only `host` does. The probe issues no query, flush or wait of its own and reads
+  only boundaries the frame already crosses, keeping it out of the `IDirect3DDevice9::Reset`
+  window. It exists so the classic-D3D9 cost is separated before any behaviour is changed.
 
 ## v0.4.1 — Native Vulkan game stability
 

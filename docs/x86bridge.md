@@ -83,7 +83,14 @@ The D3D11 frame order remains capture -> D3D11 FlushAndWait -> FRAME -> original
 2. Change intensity/structure/scale and History individually. Verify visible changes without host restart. Rebind hotkey, test enable/off and alt-tab.
 3. Change Language/StartOn/hotkey, Save; inspect existing INI. Change a value, Reload; confirm all displayed and operational values return to file values.
 4. Test transport-only with existing `DLSS5_X86BRIDGE_TRANSPORT_ONLY=1`; panel must show transport mode and engine controls disabled, result=4. Test resize and helper termination as before.
-5. Send `dlss5-neural-x86.log`, `dlss5-neural-x86-host.log`, build/import/protocol logs from build-x86bridge, and any UI screenshot/error.
+5. Set `DLSS5_X86BRIDGE_TIMING=1` when a route feels slow. The frontend then logs one averaged line per 120 completed frames splitting the bridge into `input+prepare`, `host` and `output`, and names the staging path it measured. The startup line reports `probe=on`/`probe=off` so a log says which it was.
+6. Send `dlss5-neural-x86.log`, `dlss5-neural-x86-host.log`, build/import/protocol logs from build-x86bridge, and any UI screenshot/error.
+
+### Reading the stage probe
+
+`input+prepare` covers the capture, the guide work and the D3D11 drain before the request; `host` is the bounded IPC round trip, which is the helper's inference; `output` is the finished frame's return to the back buffer. On classic D3D9 the input and output stages are a full frame crossing CPU-visible memory in each direction, so their sum is roughly fixed and does not shrink when Resolution Scale drops -- only `host` does. Compare the total against the frame budget the game is actually targeting: at 60 FPS that is 16.67 ms, and with v-sync a total just past it costs the whole half, not a proportional amount.
+
+The probe only measures. It is off by default, adds no query, flush or wait of its own, and reads only boundaries the frame already crosses -- a wait added here would land inside the `IDirect3DDevice9::Reset` window this frontend deliberately keeps clear. Measure before changing anything: altering the requested raster without knowing which stage costs what is exactly how the reverted alignment experiment happened.
 
 Native builds cover D3D9 and D3D11 x86. D3D8 is experimental and follows `game D3D8 -> d3d8to9 -> ReShade D3D9 -> native D3D9 frontend`; the neural bridge itself does not implement a second D3D8 renderer. Live D3D8/D3D9 interop, fullscreen transitions, MSAA behavior, classic-D3D9 staging performance and GPU/UI behavior still require manual game validation.
 

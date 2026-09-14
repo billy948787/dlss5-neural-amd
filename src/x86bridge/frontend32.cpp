@@ -169,6 +169,34 @@ struct Front {
     swapchain* active=nullptr;bool settings=false,enabled=false,failed=false,built=false,reset=true,hidden=false,keyDown=false,transport=false;
     int toggleKey=VK_END,toggleMods=1;bool disableAltTab=false;uint64_t generation=0,frame=0;
 } g;
+// Opt-in per-stage measurement, off unless DLSS5_X86BRIDGE_TIMING=1.
+//
+// Tuning the classic D3D9 route blind is what produced the rejected raster experiment: the
+// requested raster was altered before anyone knew whether the cost was the CPU round trip, the
+// network or the game's own pacing. This separates the three and changes nothing else.
+//
+// It never issues a query, a flush or a wait of its own. Every boundary it reads is a
+// synchronisation the frame already performs, so an enabled probe measures the same frame that
+// would have run without it. Keep it that way: a wait added here would land inside the D3D9
+// reset window this frontend works hard to keep clear.
+struct StageProbe {
+    bool on=false;double toMs=0.0;long long mark=0;
+    double input=0.0,host=0.0,output=0.0;unsigned frames=0;
+    void Arm(bool enabled){
+        LARGE_INTEGER f{};
+        on=enabled&&QueryPerformanceFrequency(&f)&&f.QuadPart>0;
+        if(on)toMs=1000.0/static_cast<double>(f.QuadPart);
+    }
+    void Begin(){if(!on)return;LARGE_INTEGER c{};if(QueryPerformanceCounter(&c))mark=c.QuadPart;}
+    double Split(){
+        if(!on)return 0.0;LARGE_INTEGER c{};if(!QueryPerformanceCounter(&c))return 0.0;
+        const double ms=static_cast<double>(c.QuadPart-mark)*toMs;mark=c.QuadPart;return ms;
+    }
+    // Only whole frames that reached the game again are averaged; an abandoned frame is no sample.
+    void Keep(double in,double h,double out){if(!on)return;input+=in;host+=h;output+=out;++frames;}
+    bool Due() const {return on&&frames>=120;}
+    void Drop(){frames=0;input=host=output=0.0;}
+} probe;
 struct Controls32 {
     x86bridge::WireSettings shadow{};x86bridge::WireStatus status{};
     bool synced=false,syncRequested=false,save=false,reload=false,factory=false,measure=false,capturing=false,preSyncEnableChanged=false;
@@ -790,7 +818,8 @@ void Settings(){
     g.toggleMods=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"dlss5",L"ToggleMods",1,ini.c_str())),0,7);
     g.disableAltTab=GetPrivateProfileIntW(L"dlss5",L"DisableOnAltTab",0,ini.c_str())!=0;
     wchar_t flag[8]{};g.transport=GetEnvironmentVariableW(L"DLSS5_X86BRIDGE_TRANSPORT_ONLY",flag,8)==1&&flag[0]==L'1';
-    Log("x86bridge native x86 protocol=%u mode=%s StartOn=%d ToggleKey=%d ToggleMods=%d",x86bridge::Version,g.transport?"TRANSPORT_ONLY":"NEURAL",g.enabled,g.toggleKey,g.toggleMods);
+    wchar_t timingFlag[8]{};probe.Arm(GetEnvironmentVariableW(L"DLSS5_X86BRIDGE_TIMING",timingFlag,8)==1&&timingFlag[0]==L'1');
+    Log("x86bridge native x86 protocol=%u mode=%s StartOn=%d ToggleKey=%d ToggleMods=%d probe=%s",x86bridge::Version,g.transport?"TRANSPORT_ONLY":"NEURAL",g.enabled,g.toggleKey,g.toggleMods,probe.on?"on":"off");
 }
 bool StartHost(){
     if(g.process)return WaitForSingleObject(g.process.value,0)==WAIT_TIMEOUT;
@@ -989,6 +1018,7 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
     }
     g.outWidth=width;g.outHeight=height;
     if(!g.colour.Ensure(g.game11.Get(),width,height,format)||!g.output.Ensure(g.game11.Get(),width,height,format)||!EnsureStage(width,height,format)){Fault("colour/staging resources unavailable");return;}
+    probe.Begin();
     if(g.nativeD3D9){
         const HRESULT uploadHr=UploadD3D9Frame(bb9.Get());
         if(FAILED(uploadHr)){if(DeferD3D9Failure("input copy",uploadHr))return;FaultHresult("D3D9 input copy did not complete",uploadHr);return;}
@@ -1002,8 +1032,10 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
     if(!BuildRemote()){Fault("resource export/BUILD failed");return;}
     x86bridge::Frame f;f.generation=g.generation;f.id=++g.frame;f.resetHistory=g.reset;
     f.depthValid=g.guideDepth.ready;f.motionValid=g.guideMotion.ready;
+    const double inputMs=probe.Split();
     x86bridge::Ack a;
     if(!x86bridge::Request(g.pipe.value,g.process.value,x86bridge::Kind::Frame,&f,sizeof(f),a)||a.generation!=f.generation||a.frame!=f.id){Fault("frame reply failed/mismatched");return;}
+    const double hostMs=probe.Split();
     g.reset=false;
     if(a.result==x86bridge::Result::Error){Fault("host error");return;}
     if(x86bridge::Confirmed(a,f,g.transport)){
@@ -1017,8 +1049,16 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
             if(!FlushAndWait11()){Fault("return D3D11 queue not drained");return;}
         }
         g.game11ctx->Flush();
+        probe.Keep(inputMs,hostMs,probe.Split());
     }else if(a.result!=x86bridge::Result::Original){Fault("unexpected presentation status");return;}
     if(g.frame<=3||g.frame%120==0)Log("x86bridge frame=%llu result=%u same_frame=1 depth=%u motion=%u",f.id,static_cast<unsigned>(a.result),f.depthValid,f.motionValid);
+    if(probe.Due()){
+        const double n=static_cast<double>(probe.frames);
+        Log("x86bridge stage probe over %u frames: input+prepare %.2f ms, host %.2f ms, output %.2f ms, bridge total %.2f ms (%s)",
+            probe.frames,probe.input/n,probe.host/n,probe.output/n,(probe.input+probe.host+probe.output)/n,
+            g.nativeD3D9?(g.d3d9Shared?"D3D9 shared GPU staging":"D3D9 classic CPU-compatible staging"):"D3D11 direct");
+        probe.Drop();
+    }
 }
 }
 extern "C" __declspec(dllexport) const char* NAME="dlss5 neural x86 bridge";

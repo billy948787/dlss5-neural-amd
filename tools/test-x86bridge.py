@@ -50,6 +50,22 @@ for unsafe in ['DropRemote(', 'FlushAndWait9(', 'FlushAndWait11(', 'ClearState('
  assert unsafe not in d3d9_reset,unsafe
 assert destroy.index('if(resize&&g.nativeD3D9)')<destroy.index('DropRemote();')
 assert 'const std::wstring name=L"\\\\\\\\.\\\\pipe\\\\dlss5-x86bridge-"' in f
+# The stage probe measures; it must never participate. It stays off unless the environment asks
+# for it, and it may only read boundaries the frame already crosses -- a wait of its own would
+# land inside the D3D9 reset window the frontend keeps clear.
+assert 'DLSS5_X86BRIDGE_TIMING' in f
+sp=f[f.index('struct StageProbe'):f.index('} probe;')]
+assert 'bool on=false;' in sp and 'QueryPerformanceFrequency' in sp and 'QueryPerformanceCounter' in sp
+for unsafe in ['FlushAndWait','CreateQuery','Issue(','GetData(','Sleep(','ClearState(','Request(','Flush()','Map(','CopyResource']:
+ assert unsafe not in sp,unsafe
+# Only a frame that reached the game again is a sample, and it is counted once.
+assert present.count('probe.Keep(')==1 and present.count('probe.Begin()')==1 and present.count('probe.Split()')==3
+assert present.index('probe.Begin()')<present.index('inputMs=probe.Split()')<present.index('Kind::Frame,&f')
+assert present.index('Kind::Frame,&f')<present.index('hostMs=probe.Split()')<present.index('Confirmed(a,f,g.transport)')<present.index('probe.Keep(')
+# The rejected classic-D3D9 raster experiment must not come back with it.
+for word in ['FrameFlagClassicD3D9','EfficientClassicD3D9Scale','D3D9 timing avg']:
+ assert word not in f,word
+
 # Verify the copied job-pending decision has identical executable text to upstream.
 u=read(root/'src/neural/neural.cpp')
 a=u[u.index('    bool runNetwork = true;',u.index('void BridgePresent')):u.index('    // 1. the game',u.index('void BridgePresent'))]
