@@ -1,5 +1,66 @@
 # Changelog
 
+## v0.5.0 — 2026-09-14 — The 32-bit bridge, D3D8, and one installer
+
+- Add native 32-bit D3D9 and D3D11 ReShade frontends and a separate 64-bit host that reuses the
+  existing neural engine and HIP runtime on the game's exact adapter.
+- Bridge D3D9 frames through private D3D9/D3D11 staging resources: shared GPU textures on D3D9Ex
+  and a CPU-compatible upload/readback fallback on classic D3D9. This removes the dgVoodoo
+  dependency and its third-party binary/security-detection problems.
+- Define a fixed-width protocol with process identity, generation, frame and settings-revision
+  validation across the x86/x64 boundary.
+- Bound frontend IPC and helper startup waits so an unresponsive helper falls back instead of
+  freezing the game's Present thread indefinitely.
+- Apply Resolution Scale only after slider editing ends, avoiding repeated network-raster staging
+  and unnecessary VRAM growth while dragging.
+- Stop the x86 installer from executing an unverified ReShade Setup sidecar. ReShade remains a
+  manual prerequisite or a separately supplied, hash-pinned payload.
+- Replace the stale checkout-hash baseline with builds of the current integrated source tree.
+- Add Windows x86/x64 build, protocol, PE/import and native named-pipe timeout checks to CI, plus
+  portable protocol/control tests on Linux.
+- Honor ReShade's `[INSTALL] BasePath` when it safely points inside the selected game directory,
+  including Source-engine layouts that load the D3D9 proxy from `bin`.
+- Keep the x86 D3D9 frontend alive across `IDirect3DDevice9::Reset`. ReShade emits
+  `destroy_swapchain` from inside the driver's reset, where submitting an event query, waiting on
+  either private GPU device or running IPC re-enters `amdxx32.dll` and crashed GTA IV on
+  exclusive-fullscreen Alt+Tab. That branch now only releases the D3D9 default-pool resources and
+  defers remote-generation retirement to the next stable presentation.
+- Return HRESULTs from the x86 D3D9 staging operations. A transient `D3DERR_DEVICELOST` or
+  `D3DERR_DEVICENOTRESET` is treated as an interrupted reset frame that keeps the host connected
+  and resets history on recovery, instead of permanently faulting the bridge.
+- Add an experimental D3D8 preset through the official, hash-pinned d3d8to9 compatibility layer.
+  It translates D3D8 to the native D3D9 frontend and does not restore the old dgVoodoo route.
+- Merge the two installers into one. `installer-x86` was a separate C++ tool with its own Win32
+  GUI covering only the 32-bit routes; its transactional model -- install manifest, backups, journal
+  with rollback, ownership tracking, safe path handling and ReShade `[INSTALL] BasePath` -- was
+  ported into the Rust installer, and both routes now run on it. The x64 route gains backups and a
+  manifest it never had, so an install can be undone precisely instead of by deleting known
+  filenames, and installs made before this keep working through a name-sweep fallback.
+- Detect the target's architecture instead of asking. The installer reads the PE header, names the
+  executable it read, and offers only the presets that exist for that width -- five of the ten
+  API-by-architecture combinations do not. A folder holding both widths is reported rather than
+  guessed at, and PCSX2 and RPCS3 stay named targets with their own guidance.
+- Turn the preflight into a gate. It used to fill a panel and stop there, so an install into a
+  read-only folder, or over a file the game still had open, went ahead and failed partway through a
+  copy. Those checks now run before the journal exists, for both routes, and name the cause.
+- Accept either shape of folder in the first field, and either a folder or an executable as the
+  target.
+- Add an opt-in x86 stage probe behind `DLSS5_X86BRIDGE_TIMING=1`, off by default. It splits the
+  bridge into `input+prepare`, `host` and `output` and averages one line per 120 completed frames,
+  naming the staging path measured. On classic D3D9 the input and output stages are a full frame
+  crossing CPU-visible memory each way, so their sum is roughly fixed and does not shrink with
+  Resolution Scale; only `host` does. The probe issues no query, flush or wait of its own and reads
+  only boundaries the frame already crosses, keeping it out of the `IDirect3DDevice9::Reset`
+  window. It exists so the classic-D3D9 cost is separated before any behaviour is changed.
+
+## v0.4.2 — Native Vulkan compatibility and lifecycle stability
+
+Tagged and published on 2026-09-12 without a section here, which is why this one is written from
+its commits rather than from notes taken at the time: native Vulkan compatibility and add-on
+lifecycle stability, resolution-scaling stability, and a MinHook linkage fix in the `framecheck`
+build. The lifecycle work spans the v0.4.1 entry below, so read the two together rather than
+assuming the boundary is clean.
+
 ## v0.4.1 — Native Vulkan game stability
 
 This release hardens the experimental Vulkan route for native games, validated on Detroit: Become

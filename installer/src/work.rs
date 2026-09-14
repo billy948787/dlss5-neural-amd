@@ -4,14 +4,19 @@
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::fs;
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt as _;
+use crate::engine;
+pub use crate::engine::Route;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The add-on, built into this executable. One file to hand out, and the installer can never
 /// install an add-on from a different release than the one it was built beside.
 pub const ADDON: &[u8] = include_bytes!("../../build/dlss5-neural.addon64");
 pub const ADDON_NAME: &str = "dlss5-neural.addon64";
+#[cfg(test)]
+const ADDON32: &str = "dlss5-neural.addon32";
+#[cfg(test)]
+const HOST64: &str = "dlss5-neural-host64.exe";
 
 pub const RUNTIME_NAME: &str = "dlssnr_amd_pass1.dll";
 pub const WEIGHTS_NAME: &str = "dlssnr_on_amd_weights.bin";
@@ -27,18 +32,66 @@ pub const WEIGHTS_SHA: &str = "6bf8dc931ef3ccffe18c82de26ab374156e7f19539ffcf8ea
 pub const RUNTIME_SHA_0214: &str =
     "e145ff963b1ef614000000000000000000000000000000000000000000000000";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
     Pcsx2,
     Rpcs3,
     Dx11,
     Dx12,
     Vulkan,
+    X86Dx11,
+    X86Dx9,
+    X86Dx8,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 5] =
+    pub const ALL: [Preset; 8] = [
+        Preset::Pcsx2,
+        Preset::Rpcs3,
+        Preset::Dx11,
+        Preset::Dx12,
+        Preset::Vulkan,
+        Preset::X86Dx11,
+        Preset::X86Dx9,
+        Preset::X86Dx8,
+    ];
+
+    const X64: [Preset; 5] =
         [Preset::Pcsx2, Preset::Rpcs3, Preset::Dx11, Preset::Dx12, Preset::Vulkan];
+    const X86: [Preset; 3] = [Preset::X86Dx11, Preset::X86Dx9, Preset::X86Dx8];
+
+    pub fn route(self) -> Route {
+        match self {
+            Preset::X86Dx11 | Preset::X86Dx9 | Preset::X86Dx8 => Route::X86,
+            _ => Route::X64,
+        }
+    }
+
+    /// What the target row offers. Five of the ten API-by-bitness combinations do not exist, and
+    /// the detected width rules out the rest, so a person is never shown a choice that cannot work.
+    /// When nothing could be detected the whole list stays available rather than guessing.
+    pub fn offered(detected: &Detected) -> &'static [Preset] {
+        match detected.route() {
+            Some(Route::X64) => &Self::X64,
+            Some(Route::X86) => &Self::X86,
+            None => &Self::ALL,
+        }
+    }
+
+    /// The string recorded in the install manifest. Kept separate from `label`, which is prose
+    /// that can be reworded, while this one has to keep matching manifests already on disk.
+    pub fn manifest_preset(self) -> &'static str {
+        match self {
+            Preset::Pcsx2 => "PCSX2",
+            Preset::Rpcs3 => "RPCS3",
+            Preset::Dx11 => "D3D11",
+            Preset::Dx12 => "D3D12",
+            Preset::Vulkan => "Vulkan",
+            Preset::X86Dx11 => "D3D11",
+            Preset::X86Dx9 => "D3D9",
+            Preset::X86Dx8 => "D3D8",
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -47,6 +100,9 @@ impl Preset {
             Preset::Dx11 => "D3D11 game",
             Preset::Dx12 => "D3D12 game",
             Preset::Vulkan => "Vulkan game",
+            Preset::X86Dx11 => "D3D11 game, 32-bit",
+            Preset::X86Dx9 => "D3D9 game, 32-bit",
+            Preset::X86Dx8 => "D3D8 game, 32-bit",
         }
     }
 
@@ -61,8 +117,8 @@ impl Preset {
     /// exactly the emulator users -- the files go beside the emulator, not beside the ROM.
     pub fn folder_label(self) -> &'static str {
         match self {
-            Preset::Pcsx2 | Preset::Rpcs3 => " Emulator folder ",
-            Preset::Dx11 | Preset::Dx12 | Preset::Vulkan => " Game folder ",
+            Preset::Pcsx2 | Preset::Rpcs3 => " Emulator folder or executable ",
+            _ => " Game folder or executable ",
         }
     }
 
@@ -73,7 +129,7 @@ impl Preset {
         match self {
             Preset::Pcsx2 => Some("pcsx2-qt.exe"),
             Preset::Rpcs3 => Some("rpcs3.exe"),
-            Preset::Dx11 | Preset::Dx12 | Preset::Vulkan => None,
+            _ => None,
         }
     }
 
@@ -103,6 +159,24 @@ impl Preset {
                  game also has to import vkCreateDevice statically -- one that resolves Vulkan \
                  through vkGetInstanceProcAddr cannot be hooked, and the add-on stands down \
                  rather than guess. No depth on Vulkan either way: colour and estimated motion."
+            }
+            Preset::X86Dx11 => {
+                "EXPERIMENTAL. A 32-bit game cannot load the 64-bit runtime, so the add-on runs as \
+                 a pair: a 32-bit frontend inside the game and a 64-bit helper beside it, sharing \
+                 frames on the same adapter. Install ReShade with full add-on support as the \
+                 32-bit dxgi.dll."
+            }
+            Preset::X86Dx9 => {
+                "EXPERIMENTAL. The same 32-bit pair as D3D11, reached through a private D3D9/D3D11 \
+                 stage. D3D9Ex shares GPU textures; plain D3D9 falls back to a CPU round trip that \
+                 costs a fixed few milliseconds every frame, no matter how far the scale is turned \
+                 down. Install ReShade as the 32-bit d3d9.dll."
+            }
+            Preset::X86Dx8 => {
+                "EXPERIMENTAL. D3D8 is translated to D3D9 by the pinned d3d8to9 build and then \
+                 takes the D3D9 route above; there is no second renderer here. A game that already \
+                 ships its own d3d8.dll wrapper keeps it, and the translator is installed beside \
+                 it as d3d8R.dll. Install ReShade as the 32-bit d3d9.dll."
             }
         }
     }
@@ -174,6 +248,7 @@ impl Report {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn sha256(path: &Path) -> std::io::Result<String> {
     let bytes = fs::read(path)?;
     let mut hasher = Sha256::new();
@@ -183,6 +258,28 @@ fn sha256(path: &Path) -> std::io::Result<String> {
 
 /// Accepts either the folder holding the two files or one of the files themselves, because both
 /// are things a person reasonably pastes.
+/// The path exactly as typed, file or folder. `resolve_source` deliberately turns a dropped
+/// executable into its folder, which is right for a flow that installs into one and wrong for
+/// anything that has to read the PE header of the executable itself.
+fn resolve_target(raw: &str) -> PathBuf {
+    PathBuf::from(raw.trim().trim_matches('"'))
+}
+
+/// Field 1 takes either shape of folder, so one field means one thing on both routes.
+///
+/// A release folder keeps its payloads in `files\`, and it already carries the runtime and the
+/// weights, so it serves the x64 route too. A folder holding just the two unzipped files is what
+/// this screen has always asked for and still works. Whichever was given, this is where the x64
+/// route reads its payloads from.
+pub fn payload_dir(source: &Path) -> PathBuf {
+    let nested = source.join("files");
+    if nested.join(RUNTIME_NAME).is_file() || nested.join(WEIGHTS_NAME).is_file() {
+        nested
+    } else {
+        source.to_path_buf()
+    }
+}
+
 fn resolve_source(raw: &str) -> PathBuf {
     let p = PathBuf::from(raw.trim().trim_matches('"'));
     if p.is_file() {
@@ -242,25 +339,28 @@ fn check_exe(dir: &Path, preset: Preset, report: &mut Report) {
     }
 }
 
-fn copy_verified(
+/// Verify a payload in the folder the user pointed at and hand back its bytes. This is the half of
+/// the old `copy_verified` that decides whether a file is acceptable; whether it then gets written
+/// is [`engine::apply`]'s decision, because that is what records ownership and takes the backup.
+fn verified_payload(
     src_dir: &Path,
-    dst_dir: &Path,
     name: &str,
     want_sha: &str,
     report: &mut Report,
-) -> bool {
+) -> Option<Vec<u8>> {
     let src = src_dir.join(name);
     if !src.is_file() {
         report.err(format!("{name} is not in the runtime folder you gave."));
-        return false;
+        return None;
     }
-    let got = match sha256(&src) {
-        Ok(h) => h,
+    let bytes = match fs::read(&src) {
+        Ok(b) => b,
         Err(e) => {
             report.err(format!("could not read {name}: {e}"));
-            return false;
+            return None;
         }
     };
+    let got = engine::sha(&bytes);
     if got != want_sha {
         if name == RUNTIME_NAME && got.starts_with(&RUNTIME_SHA_0214[..16]) {
             report.err(format!(
@@ -273,26 +373,30 @@ fn copy_verified(
                  got      {got}\n      The add-on hashes the runtime at load and will refuse it."
             ));
         }
-        return false;
+        return None;
     }
-    // Same file already in place: copying it over itself would be a no-op that can still fail on
-    // a locked handle, so say so instead.
-    let dst = dst_dir.join(name);
-    if dst.is_file() && sha256(&dst).map(|h| h == want_sha).unwrap_or(false) {
+    Some(bytes)
+}
+
+/// The engine speaks the x86 installer's vocabulary. Until step 4 unifies the wording, translate it
+/// into the sentences this screen has always printed, so the terminal output does not change shape
+/// underneath people who are following the README.
+fn narrate(line: &str, report: &mut Report) {
+    if let Some(name) = line.strip_prefix("IDENTICAL: ") {
         report.ok(format!("{name} already correct, left alone."));
-        return true;
-    }
-    match fs::copy(&src, &dst) {
-        Ok(_) => {
-            report.ok(format!("{name} copied and verified."));
-            true
-        }
-        Err(e) => {
-            report.err(format!(
-                "could not write {name}: {e}. If the game is open, close it and try again."
-            ));
-            false
-        }
+    } else if let Some(name) = line.strip_prefix("CREATE: ") {
+        report.ok(format!("{name} copied and verified."));
+    } else if let Some(name) = line.strip_prefix("EXTERNAL backed up: ") {
+        report.ok(format!("{name} replaced; the previous file was backed up."));
+    } else if let Some(name) = line.strip_prefix("RESTORED: ") {
+        report.ok(format!("restored {name} from its backup"));
+    } else if let Some(name) = line.strip_prefix("REMOVED: ") {
+        report.ok(format!("removed {name}"));
+    } else if let Some(rest) = line.strip_prefix("WARNING ") {
+        report.warn(rest.to_string());
+    } else {
+        // PRESERVED lines and anything the engine adds later read fine as they are.
+        report.info(line.to_string());
     }
 }
 
@@ -323,39 +427,6 @@ fn sweep_dead(dir: &Path, report: &mut Report) {
 // call -- so the screen can answer "will this work?" while the path is still being pasted,
 // instead of after 147 MB have been copied into a folder that was read-only.
 
-/// Can this folder be written to at all? Program Files without elevation is the usual answer.
-fn folder_is_writable(dir: &Path) -> bool {
-    let probe = dir.join(".dlss5-installer-write-probe");
-    match fs::write(&probe, b"") {
-        Ok(()) => {
-            let _ = fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-/// A file that exists but cannot be opened for writing is held by something -- on Windows that is
-/// nearly always the game still running, which is the single most common way an install fails.
-fn is_locked(path: &Path) -> bool {
-    path.is_file() && fs::OpenOptions::new().write(true).open(path).is_err()
-}
-
-#[cfg(windows)]
-fn free_bytes(dir: &Path) -> Option<u64> {
-    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-    let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
-    wide.push(0);
-    let mut free = 0u64;
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut())
-    };
-    (ok != 0).then_some(free)
-}
-#[cfg(not(windows))]
-fn free_bytes(_dir: &Path) -> Option<u64> {
-    None
-}
 
 /// ReShade writes `DisabledAddons=` into its own ini the first time anyone unticks an add-on, and
 /// from then on it never loads it again and says nothing anywhere. It is the one failure in this
@@ -379,11 +450,6 @@ fn check_disabled_addons(dir: &Path, report: &mut Report) {
     }
 }
 
-/// Same file, same bytes? Only the length is compared -- see `RUNTIME_SIZE`.
-fn size_of(path: &Path) -> Option<u64> {
-    fs::metadata(path).ok().map(|m| m.len())
-}
-
 /// What is known before F5, from whatever is filled in so far. Never writes anything except one
 /// zero-byte probe it removes again.
 pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
@@ -398,8 +464,9 @@ pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
         report.err(format!("Field 1: {} is not a folder.", src.display()));
     } else {
         let mut all_there = true;
+        let payloads = payload_dir(&src);
         for (name, want) in [(RUNTIME_NAME, RUNTIME_SIZE), (WEIGHTS_NAME, WEIGHTS_SIZE)] {
-            match size_of(&src.join(name)) {
+            match engine::size_of(&payloads.join(name)) {
                 None => {
                     report.err(format!("{name} is not in that folder."));
                     all_there = false;
@@ -433,7 +500,7 @@ pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
         return report;
     }
 
-    if !folder_is_writable(&dir) {
+    if !engine::folder_is_writable(&dir) {
         report.err(
             "That folder cannot be written to. It is either read-only or somewhere that needs \
              administrator rights -- run this installer as administrator, or move the game.",
@@ -444,7 +511,7 @@ pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     // fs::copy come back with "Acesso negado" halfway through.
     let held: Vec<&str> = [ADDON_NAME, RUNTIME_NAME, WEIGHTS_NAME]
         .into_iter()
-        .filter(|n| is_locked(&dir.join(n)))
+        .filter(|n| engine::is_locked(&dir.join(n)))
         .collect();
     if !held.is_empty() {
         report.err(format!(
@@ -460,11 +527,11 @@ pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     for (name, size) in
         [(ADDON_NAME, ADDON.len() as u64), (RUNTIME_NAME, RUNTIME_SIZE), (WEIGHTS_NAME, WEIGHTS_SIZE)]
     {
-        if size_of(&dir.join(name)) != Some(size) {
+        if engine::size_of(&dir.join(name)) != Some(size) {
             need += size;
         }
     }
-    if let Some(free) = free_bytes(&dir) {
+    if let Some(free) = engine::free_bytes(&dir) {
         if need > 0 && free < need {
             report.err(format!(
                 "Not enough room: {} MB free, and this needs {} MB. The weights alone are {} MB.",
@@ -495,7 +562,143 @@ pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     report
 }
 
+/// The 32-bit route reads the PE header to be certain, so it needs the executable and not just the
+/// folder. When a folder was given and exactly one 32-bit executable is in it, that is unambiguous
+/// and gets used; anything else is a question only the person can answer.
+fn x86_target(game_dir: &str, report: &mut Report) -> Option<PathBuf> {
+    let path = resolve_target(game_dir);
+    if path.is_file() {
+        return Some(path);
+    }
+    if !path.is_dir() {
+        report.err(format!("{} is not a folder.", path.display()));
+        return None;
+    }
+    let mut found: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let is_exe = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("exe"))
+                == Some(true);
+            if p.is_file()
+                && is_exe
+                && engine::machine_of_file(&p) == Some(engine::MACHINE_X86)
+            {
+                found.push(p);
+            }
+        }
+    }
+    match found.len() {
+        1 => Some(found.remove(0)),
+        0 => {
+            report.err(
+                "No 32-bit executable in that folder. The bridge route needs the game's own .exe: \
+                 point field 2 straight at it.",
+            );
+            None
+        }
+        _ => {
+            let names: Vec<String> = found
+                .iter()
+                .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                .collect();
+            report.err(format!(
+                "More than one 32-bit executable here ({}). Point field 2 at the one the game \
+                 actually runs, rather than at the folder.",
+                names.join(", ")
+            ));
+            None
+        }
+    }
+}
+
+fn install_x86(game_dir: &str, release_dir: &str, preset: Preset) -> Report {
+    let mut report = Report::new();
+    let Some(target) = x86_target(game_dir, &mut report) else {
+        return report;
+    };
+    let release = resolve_source(release_dir);
+    if release.as_os_str().is_empty() {
+        report.err(
+            "Field 1 has to be the folder you unzipped the x86 release into -- the one holding \
+             files\\ and payload.sha256. The bridge ships as separate files, so nothing can be \
+             installed without it.",
+        );
+        return report;
+    }
+    if !release.join("payload.sha256").is_file() {
+        report.err(format!(
+            "{} does not look like the x86 release: payload.sha256 is not in it.",
+            release.display()
+        ));
+        return report;
+    }
+
+    report.info(format!("target: {}", target.display()));
+    report.info(format!("preset: {}", preset.label()));
+
+    let mut app = engine::Installer::new(release);
+    let outcome = app.install(&target, preset.manifest_preset());
+    for line in &app.log {
+        narrate(line, &mut report);
+    }
+    match outcome {
+        Ok(()) => {
+            report.info(preset.note());
+            report.info(
+                "It starts switched off. Open the overlay with Home, or press Ctrl+End. StartOn=1 \
+                 in dlss5-neural.ini makes it come up enabled.",
+            );
+        }
+        Err(e) => report.err(format!(
+            "{e}. Nothing was left half-written: the install rolled itself back."
+        )),
+    }
+    report
+}
+
+fn uninstall_x86(game_dir: &str) -> Report {
+    let mut report = Report::new();
+    let path = resolve_target(game_dir);
+    if path.as_os_str().is_empty() {
+        report.err("No game folder given.");
+        return report;
+    }
+    // Uninstall works off the manifest, so the folder is enough -- but accept an executable too,
+    // because that is what the same field held during the install.
+    let dir = if path.is_file() {
+        match engine::install_directory(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                report.err(e.0);
+                return report;
+            }
+        }
+    } else {
+        path
+    };
+    report.info(format!("target: {}", dir.display()));
+
+    let mut log = Vec::new();
+    match engine::uninstall(&dir, Route::X86, false, &mut log) {
+        Ok(()) => {
+            for line in &log {
+                narrate(line, &mut report);
+            }
+        }
+        Err(e) => report.err(format!("{e}")),
+    }
+    report.info("ReShade itself was left alone. Use its own installer to remove it.");
+    report
+}
+
 pub fn install(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
+    if preset.route() == Route::X86 {
+        return install_x86(game_dir, runtime_dir, preset);
+    }
     let mut report = Report::new();
     let dir = resolve_source(game_dir);
     let src = resolve_source(runtime_dir);
@@ -514,12 +717,10 @@ pub fn install(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     check_exe(&dir, preset, &mut report);
     check_reshade(&dir, preset, &mut report);
 
-    match fs::write(dir.join(ADDON_NAME), ADDON) {
-        Ok(()) => report.ok(format!("{ADDON_NAME} written ({} bytes).", ADDON.len())),
-        Err(e) => report.err(format!(
-            "could not write {ADDON_NAME}: {e}. If the game is open, close it and try again."
-        )),
-    }
+    // The add-on is always part of the plan. The runtime and the weights join it only when the
+    // folder holding them was given and every byte checked out.
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    files.insert(ADDON_NAME.to_string(), ADDON.to_vec());
 
     if src.as_os_str().is_empty() {
         report.warn(
@@ -529,8 +730,43 @@ pub fn install(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     } else if !src.is_dir() {
         report.err(format!("{} is not a folder.", src.display()));
     } else {
-        copy_verified(&src, &dir, RUNTIME_NAME, RUNTIME_SHA, &mut report);
-        copy_verified(&src, &dir, WEIGHTS_NAME, WEIGHTS_SHA, &mut report);
+        let payloads = payload_dir(&src);
+        for (name, want) in [(RUNTIME_NAME, RUNTIME_SHA), (WEIGHTS_NAME, WEIGHTS_SHA)] {
+            if let Some(bytes) = verified_payload(&payloads, name, want, &mut report) {
+                files.insert(name.to_string(), bytes);
+            }
+        }
+    }
+
+    // A refused payload now stops the whole install rather than leaving the add-on behind on its
+    // own. The transaction is all-or-nothing, which is the point of routing through the engine.
+    if report.failed {
+        report.info("Nothing was written: fix the problem above and run it again.");
+        return report;
+    }
+
+    let mut log = Vec::new();
+    match engine::apply(
+        &dir,
+        preset.manifest_preset(),
+        Route::X64,
+        &files,
+        &mut log,
+    ) {
+        Ok(()) => {
+            for line in &log {
+                narrate(line, &mut report);
+            }
+        }
+        Err(e) => {
+            for line in &log {
+                narrate(line, &mut report);
+            }
+            report.err(format!(
+                "{e}. Nothing was left half-written: the install rolled itself back."
+            ));
+            return report;
+        }
     }
 
     sweep_dead(&dir, &mut report);
@@ -545,7 +781,10 @@ pub fn install(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     report
 }
 
-pub fn uninstall(game_dir: &str, _preset: Preset) -> Report {
+pub fn uninstall(game_dir: &str, preset: Preset) -> Report {
+    if preset.route() == Route::X86 {
+        return uninstall_x86(game_dir);
+    }
     let mut report = Report::new();
     let dir = resolve_source(game_dir);
     if dir.as_os_str().is_empty() {
@@ -558,20 +797,45 @@ pub fn uninstall(game_dir: &str, _preset: Preset) -> Report {
     }
     report.info(format!("target: {}", dir.display()));
 
-    // Everything the add-on installs or writes. The ini is deliberately not in this list.
-    let mut names: Vec<String> = vec![
-        ADDON_NAME.into(),
-        RUNTIME_NAME.into(),
-        WEIGHTS_NAME.into(),
-        "dlss5-pass1.dll".into(),
-        "dlss5-neural.log".into(),
-        "dlssnr_on_amd.log".into(),
-        "dlssnr_on_amd.ini".into(),
-    ];
-    names.extend(dead_files());
-
     let mut gone = 0usize;
-    for name in &names {
+
+    // An install written by this version has a manifest, so it knows what it owned, what it
+    // displaced and what the user has changed since. Installs from before the manifest existed have
+    // none, and the name sweep below is the only way to take those back.
+    let manifest = dir.join(Route::X64.manifest_name());
+    if manifest.is_file() {
+        let mut log = Vec::new();
+        match engine::uninstall(&dir, Route::X64, false, &mut log) {
+            Ok(()) => {
+                for line in &log {
+                    narrate(line, &mut report);
+                }
+                gone += 1;
+            }
+            Err(e) => report.err(format!("could not undo the recorded install: {e}")),
+        }
+    } else {
+        // Everything the add-on installs. The ini is deliberately not in this list.
+        let mut names: Vec<String> =
+            vec![ADDON_NAME.into(), RUNTIME_NAME.into(), WEIGHTS_NAME.into()];
+        names.extend(dead_files());
+        for name in &names {
+            let p = dir.join(name);
+            if p.is_file() {
+                match fs::remove_file(&p) {
+                    Ok(()) => {
+                        gone += 1;
+                        report.ok(format!("removed {name}"));
+                    }
+                    Err(e) => report.err(format!("could not remove {name}: {e}")),
+                }
+            }
+        }
+    }
+
+    // Written by the add-on itself at run time, so they are never in a manifest and are swept the
+    // same way whichever branch ran above.
+    for name in ["dlss5-pass1.dll", "dlss5-neural.log", "dlssnr_on_amd.log", "dlssnr_on_amd.ini"] {
         let p = dir.join(name);
         if p.is_file() {
             match fs::remove_file(&p) {
@@ -583,7 +847,6 @@ pub fn uninstall(game_dir: &str, _preset: Preset) -> Report {
             }
         }
     }
-
     for folder in ["dlss5-runtime", "dlss5-captures"] {
         let p = dir.join(folder);
         if p.is_dir() {
@@ -614,6 +877,136 @@ pub fn uninstall(game_dir: &str, _preset: Preset) -> Report {
 // it: what lands in a folder, what is refused, and what uninstall takes back out. The real
 // weights are 147 MB, so the tests use stand-ins and assert on the paths that do not need the
 // genuine bytes -- a wrong hash, a missing file, the dead-file sweep, the round trip.
+/// What the target says about which route applies.
+///
+/// `docs/installer-merge.md` calls for bitness to be detected rather than asked, and it is -- but
+/// implementing it turned up a case the plan did not: the x64 screen has always taken a *folder*,
+/// and a folder can hold a 32-bit launcher next to a 64-bit game. So this detects when the answer
+/// is unambiguous and says so when it is not, rather than picking one and being confidently wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Detected {
+    /// Every executable found agrees.
+    Route(engine::Route, String),
+    /// Executables of both widths are present; the person has to say which one they run.
+    Mixed(String),
+    /// Nothing to read: an empty field, a folder with no executables, or a path that is not there.
+    Unknown,
+}
+
+impl Detected {
+    pub fn route(&self) -> Option<engine::Route> {
+        match self {
+            Detected::Route(r, _) => Some(*r),
+            _ => None,
+        }
+    }
+
+    /// The line the screen shows under the target field.
+    pub fn line(&self) -> Option<&str> {
+        match self {
+            Detected::Route(_, why) | Detected::Mixed(why) => Some(why),
+            Detected::Unknown => None,
+        }
+    }
+}
+
+fn route_of(machine: u16) -> Option<engine::Route> {
+    match machine {
+        engine::MACHINE_X86 => Some(Route::X86),
+        engine::MACHINE_X64 => Some(Route::X64),
+        _ => None,
+    }
+}
+
+/// Read the target -- an executable, or the executables sitting in a folder -- and decide.
+pub fn detect(target: &str) -> Detected {
+    let path = resolve_target(target);
+    if path.as_os_str().is_empty() {
+        return Detected::Unknown;
+    }
+
+    if path.is_file() {
+        return match engine::machine_of_file(&path).and_then(route_of) {
+            Some(Route::X86) => Detected::Route(
+                Route::X86,
+                format!(
+                    "{} is a 32-bit executable, so this is the bridge route.",
+                    name_of(&path)
+                ),
+            ),
+            Some(Route::X64) => Detected::Route(
+                Route::X64,
+                format!("{} is a 64-bit executable.", name_of(&path)),
+            ),
+            None => Detected::Unknown,
+        };
+    }
+    if !path.is_dir() {
+        return Detected::Unknown;
+    }
+
+    let mut x86: Vec<String> = Vec::new();
+    let mut x64: Vec<String> = Vec::new();
+    let Ok(entries) = fs::read_dir(&path) else {
+        return Detected::Unknown;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        if p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("exe")) != Some(true)
+        {
+            continue;
+        }
+        match engine::machine_of_file(&p).and_then(route_of) {
+            Some(Route::X86) => x86.push(name_of(&p)),
+            Some(Route::X64) => x64.push(name_of(&p)),
+            None => {}
+        }
+    }
+
+    match (x86.is_empty(), x64.is_empty()) {
+        (true, true) => Detected::Unknown,
+        (false, true) => Detected::Route(
+            Route::X86,
+            format!(
+                "{} here {} 32-bit, so this is the bridge route.",
+                joined(&x86),
+                if x86.len() == 1 { "is" } else { "are" }
+            ),
+        ),
+        (true, false) => Detected::Route(
+            Route::X64,
+            format!(
+                "{} here {} 64-bit.",
+                joined(&x64),
+                if x64.len() == 1 { "is" } else { "are" }
+            ),
+        ),
+        (false, false) => Detected::Mixed(format!(
+            "Both widths are here: {} is 32-bit and {} is 64-bit. A 32-bit launcher beside a \
+             64-bit game is normal -- pick the one the game actually runs as.",
+            joined(&x86),
+            joined(&x64)
+        )),
+    }
+}
+
+fn name_of(p: &Path) -> String {
+    p.file_name().unwrap_or_default().to_string_lossy().to_string()
+}
+
+/// Three names at most: the point is to show the evidence, not to list a folder.
+fn joined(names: &[String]) -> String {
+    let shown: Vec<&str> = names.iter().take(3).map(|s| s.as_str()).collect();
+    if names.len() > shown.len() {
+        format!("{} and {} more", shown.join(", "), names.len() - shown.len())
+    } else {
+        shown.join(", ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,6 +1076,344 @@ mod tests {
         for n in 2..=10 {
             assert!(!game.join(format!("dlssnr_amd_pass{n}.dll")).exists(), "pass{n} survived");
         }
+    }
+
+    fn pe_bytes(x64: bool) -> Vec<u8> {
+        let mut b = vec![0u8; 512];
+        b[0] = 0x4d;
+        b[1] = 0x5a;
+        b[60] = 128;
+        b[128] = 0x50;
+        b[129] = 0x45;
+        let machine: u16 = if x64 { 0x8664 } else { 0x14c };
+        b[132] = (machine & 0xff) as u8;
+        b[133] = (machine >> 8) as u8;
+        let magic: u16 = if x64 { 0x20b } else { 0x10b };
+        b[152] = (magic & 0xff) as u8;
+        b[153] = (magic >> 8) as u8;
+        b
+    }
+
+    /// The bridge route end to end against the real release, including the case Silent Hill 3
+    /// actually is: a game that already ships its own d3d8.dll wrapper, which must survive.
+    ///
+    /// Set DLSS5_TEST_RELEASE_DIR to the release folder (the one holding files\ and
+    /// payload.sha256). Skipped otherwise, because the payloads are private and 147 MB.
+    #[test]
+    fn a_real_x86_round_trip_through_the_release_folder() {
+        let Ok(release) = std::env::var("DLSS5_TEST_RELEASE_DIR") else {
+            eprintln!("skipped: set DLSS5_TEST_RELEASE_DIR to the x86 release folder");
+            return;
+        };
+        let has_d3d8to9 = PathBuf::from(&release).join("files/d3d8to9.dll").is_file();
+
+        let game = temp("x86-real");
+        let exe = game.join("game.exe");
+        fs::write(&exe, pe_bytes(false)).unwrap();
+        // A maintained wrapper that forwards to d3d8R.dll, the shape the PC Fix has.
+        let wrapper = {
+            let mut b = pe_bytes(false);
+            b.extend_from_slice(b"d3d8R.dll");
+            b
+        };
+        if has_d3d8to9 {
+            fs::write(game.join("d3d8.dll"), &wrapper).unwrap();
+        }
+        // ReShade has to already be there, since the public release carries no proxy.
+        let reshade = PathBuf::from(&release).join("files/dxgi.dll");
+        let preset = if has_d3d8to9 { Preset::X86Dx8 } else { Preset::X86Dx11 };
+        if !reshade.is_file() && preset == Preset::X86Dx11 {
+            eprintln!("skipped: no ReShade sidecar in the release folder");
+            return;
+        }
+
+        let report = install(exe.to_str().unwrap(), &release, preset);
+        assert!(!report.failed, "{}", report.to_log("x86 real"));
+
+        assert!(game.join(ADDON32).is_file(), "the 32-bit frontend was not installed");
+        assert!(game.join(HOST64).is_file(), "the 64-bit helper was not installed");
+        let manifest = game.join(engine::MANIFEST_NAME);
+        assert!(manifest.is_file(), "the bridge route must journal what it did");
+        let m = engine::decode(&String::from_utf8(fs::read(&manifest).unwrap()).unwrap()).unwrap();
+        assert_eq!(m.route, engine::Route::X86);
+
+        if has_d3d8to9 {
+            assert_eq!(
+                fs::read(game.join("d3d8.dll")).unwrap(),
+                wrapper,
+                "the game's own wrapper must survive byte for byte"
+            );
+            assert!(game.join("d3d8R.dll").is_file(), "the translator goes beside it");
+        }
+
+        // Running it twice is what a person does when they are not sure it worked.
+        let again = install(exe.to_str().unwrap(), &release, preset);
+        assert!(!again.failed, "{}", again.to_log("x86 reinstall"));
+
+        let removed = uninstall(exe.to_str().unwrap(), preset);
+        assert!(!removed.failed, "{}", removed.to_log("x86 uninstall"));
+        assert!(!game.join(ADDON32).exists(), "uninstall left the frontend behind");
+        assert!(!game.join(HOST64).exists());
+        if has_d3d8to9 {
+            assert_eq!(
+                fs::read(game.join("d3d8.dll")).unwrap(),
+                wrapper,
+                "uninstall must not touch the wrapper it never owned"
+            );
+            assert!(!game.join("d3d8R.dll").exists(), "the translator was ours to remove");
+        }
+    }
+
+    /// The notes are wrapped across source lines with a trailing backslash, which is easy to lose
+    /// in an edit -- and losing it bakes the indentation into the string, where it shows up as a
+    /// run of spaces in the middle of a sentence on screen.
+    #[test]
+    fn no_preset_note_carries_the_indentation_of_its_own_source() {
+        for p in Preset::ALL {
+            let note = p.note();
+            assert!(!note.contains("  "), "{:?} has a run of spaces in it: {note}", p);
+            assert!(!note.contains('\n'), "{:?} has a hard line break; the pane wraps", p);
+            assert!(note.len() > 40, "{:?} has no note worth showing", p);
+        }
+        for p in Preset::ALL {
+            assert!(!p.label().is_empty() && !p.folder_label().trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_executable_names_its_own_width() {
+        let dir = temp("detect-exe");
+        let x86 = dir.join("old-game.exe");
+        let x64 = dir.join("new-game.exe");
+        fs::write(&x86, pe_bytes(false)).unwrap();
+        fs::write(&x64, pe_bytes(true)).unwrap();
+
+        let d = detect(x86.to_str().unwrap());
+        assert_eq!(d.route(), Some(Route::X86));
+        assert!(d.line().unwrap().contains("old-game.exe"), "the evidence is named");
+
+        assert_eq!(detect(x64.to_str().unwrap()).route(), Some(Route::X64));
+        assert_eq!(detect("").route(), None);
+    }
+
+    #[test]
+    fn a_folder_is_read_through_the_executables_in_it() {
+        let dir = temp("detect-folder");
+        fs::write(dir.join("game.exe"), pe_bytes(true)).unwrap();
+        fs::write(dir.join("readme.txt"), b"not an executable").unwrap();
+        assert_eq!(detect(dir.to_str().unwrap()).route(), Some(Route::X64));
+
+        // A 32-bit launcher beside a 64-bit game is ordinary, and guessing between them would be
+        // worse than saying so.
+        fs::write(dir.join("launcher.exe"), pe_bytes(false)).unwrap();
+        let mixed = detect(dir.to_str().unwrap());
+        assert_eq!(mixed.route(), None);
+        assert!(matches!(mixed, Detected::Mixed(_)));
+        assert!(mixed.line().unwrap().contains("launcher.exe"));
+    }
+
+    #[test]
+    fn a_folder_with_nothing_to_read_stays_unknown() {
+        let dir = temp("detect-empty");
+        assert_eq!(detect(dir.to_str().unwrap()), Detected::Unknown);
+        fs::write(dir.join("notes.txt"), b"x").unwrap();
+        assert_eq!(detect(dir.to_str().unwrap()), Detected::Unknown);
+    }
+
+    #[test]
+    fn the_offered_presets_follow_the_detected_width() {
+        let all = Preset::offered(&Detected::Unknown);
+        assert_eq!(all.len(), Preset::ALL.len(), "nothing known yet offers everything");
+
+        let x64 = Preset::offered(&Detected::Route(Route::X64, String::new()));
+        assert!(x64.contains(&Preset::Pcsx2) && x64.contains(&Preset::Vulkan));
+        assert!(
+            !x64.iter().any(|p| p.route() == Route::X86),
+            "a 64-bit target must not be offered the bridge presets"
+        );
+
+        let x86 = Preset::offered(&Detected::Route(Route::X86, String::new()));
+        assert_eq!(x86, &[Preset::X86Dx11, Preset::X86Dx9, Preset::X86Dx8]);
+        assert!(
+            !x86.iter().any(|p| p.route() == Route::X64),
+            "D3D12 and Vulkan have no 32-bit route at all"
+        );
+    }
+
+    #[test]
+    fn the_bridge_route_wants_the_executable_and_says_why() {
+        let game = temp("x86-folder");
+        fs::write(game.join("a.exe"), pe_bytes(false)).unwrap();
+        fs::write(game.join("b.exe"), pe_bytes(false)).unwrap();
+        let report = install(game.to_str().unwrap(), "", Preset::X86Dx9);
+        assert!(report.failed);
+        assert!(
+            has_err(&report, "More than one 32-bit executable"),
+            "{}",
+            report.to_log("ambiguous")
+        );
+
+        // One candidate is unambiguous, so the folder is enough and the release folder is what is
+        // missing next.
+        fs::remove_file(game.join("b.exe")).unwrap();
+        let report = install(game.to_str().unwrap(), "", Preset::X86Dx9);
+        assert!(report.failed);
+        assert!(has_err(&report, "payload.sha256") || has_err(&report, "unzipped the x86 release"),
+            "{}", report.to_log("no release"));
+    }
+
+    #[test]
+    fn a_64_bit_target_is_refused_by_the_bridge_route_before_anything_is_written() {
+        let game = temp("x86-wrong-width");
+        let exe = game.join("game64.exe");
+        fs::write(&exe, pe_bytes(true)).unwrap();
+        let release = temp("x86-wrong-width-release");
+        fs::write(release.join("payload.sha256"), b"").unwrap();
+
+        let report = install(exe.to_str().unwrap(), release.to_str().unwrap(), Preset::X86Dx11);
+        assert!(report.failed);
+        assert!(has_err(&report, "PE32/x86"), "{}", report.to_log("width"));
+        assert!(!game.join(engine::MANIFEST_NAME).exists());
+    }
+
+    #[test]
+    fn an_install_now_records_a_manifest_the_engine_can_read_back() {
+        let game = temp("x64-manifest");
+        let report = install(game.to_str().unwrap(), "", Preset::Dx12);
+        assert!(!report.failed);
+
+        let manifest = game.join(Route::X64.manifest_name());
+        assert!(manifest.is_file(), "the x64 route must now journal what it did");
+        assert_ne!(
+            Route::X64.manifest_name(),
+            engine::MANIFEST_NAME,
+            "an x64 install must not drop the x86 bridge's filename into the folder"
+        );
+
+        let text = String::from_utf8(fs::read(&manifest).unwrap()).unwrap();
+        let m = engine::decode(&text).expect("the manifest we just wrote must decode");
+        assert_eq!(m.preset, "D3D12");
+        assert_eq!(m.route, Route::X64);
+        assert!(m.entries.iter().any(|e| e.name == ADDON_NAME && e.owned));
+    }
+
+    #[test]
+    fn an_add_on_already_in_the_folder_is_backed_up_before_being_replaced() {
+        let game = temp("x64-backup");
+        // Somebody else's file under our name: it must be recoverable, not overwritten silently.
+        fs::write(game.join(ADDON_NAME), b"a different add-on").unwrap();
+
+        let report = install(game.to_str().unwrap(), "", Preset::Dx11);
+        assert!(!report.failed, "{}", report.to_log("backup"));
+        assert_eq!(fs::read(game.join(ADDON_NAME)).unwrap(), ADDON);
+
+        let backups = game.join(engine::BACKUP_DIR);
+        assert!(backups.is_dir(), "the displaced file must be kept");
+        let found = walk(&backups);
+        assert!(
+            found.iter().any(|p| fs::read(p).unwrap() == b"a different add-on"),
+            "the original bytes must be in the backup"
+        );
+
+        // And uninstall puts it back rather than deleting what was not ours to delete.
+        let removed = uninstall(game.to_str().unwrap(), Preset::Dx11);
+        assert!(!removed.failed, "{}", removed.to_log("restore"));
+        assert_eq!(
+            fs::read(game.join(ADDON_NAME)).unwrap(),
+            b"a different add-on",
+            "uninstall must restore the file the install displaced"
+        );
+    }
+
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(entries) = fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    out.extend(walk(&p));
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_x64_route_now_refuses_to_install_over_a_file_the_game_is_holding() {
+        let game = temp("x64-locked");
+        let held = game.join(ADDON_NAME);
+        fs::write(&held, b"held open by the running game").unwrap();
+        let mut perms = fs::metadata(&held).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&held, perms).unwrap();
+
+        // Before step 3 this reached fs::write and came back with an OS error partway through.
+        let report = install(game.to_str().unwrap(), "", Preset::Dx11);
+        assert!(report.failed);
+        assert!(
+            has_err(&report, "open by another program"),
+            "{}",
+            report.to_log("locked")
+        );
+        assert!(!game.join(Route::X64.manifest_name()).exists());
+
+        let mut perms = fs::metadata(&held).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&held, perms).unwrap();
+        assert_eq!(fs::read(&held).unwrap(), b"held open by the running game");
+    }
+
+    #[test]
+    fn an_install_from_before_the_manifest_existed_can_still_be_uninstalled() {
+        let game = temp("x64-legacy");
+        // Exactly what an older release left behind: our files, no manifest.
+        fs::write(game.join(ADDON_NAME), ADDON).unwrap();
+        fs::write(game.join(RUNTIME_NAME), b"old runtime").unwrap();
+        fs::write(game.join(WEIGHTS_NAME), b"old weights").unwrap();
+        fs::write(game.join("dlss5-neural.ini"), b"[dlss5]\nScale=0.5\n").unwrap();
+        fs::create_dir_all(game.join("dlss5-runtime")).unwrap();
+        assert!(!game.join(Route::X64.manifest_name()).exists());
+
+        let report = uninstall(game.to_str().unwrap(), Preset::Dx11);
+        assert!(!report.failed, "{}", report.to_log("legacy"));
+        for name in [ADDON_NAME, RUNTIME_NAME, WEIGHTS_NAME] {
+            assert!(!game.join(name).exists(), "{name} survived a legacy uninstall");
+        }
+        assert!(!game.join("dlss5-runtime").exists());
+        assert!(game.join("dlss5-neural.ini").is_file(), "the ini is still the user's");
+    }
+
+    #[test]
+    fn a_refused_payload_now_leaves_the_folder_untouched() {
+        let game = temp("x64-atomic");
+        let src = temp("x64-atomic-src");
+        fs::write(src.join(RUNTIME_NAME), b"not the runtime").unwrap();
+        fs::write(src.join(WEIGHTS_NAME), b"not the weights").unwrap();
+
+        let report = install(game.to_str().unwrap(), src.to_str().unwrap(), Preset::Dx11);
+        assert!(report.failed);
+        // The add-on used to be written before the payloads were checked, so a refusal left it
+        // behind on its own. Routing through the engine made the whole thing one transaction.
+        assert!(!game.join(ADDON_NAME).exists(), "nothing may be written when a payload is refused");
+        assert!(!game.join(Route::X64.manifest_name()).exists());
+    }
+
+    #[test]
+    fn the_two_routes_do_not_mistake_each_other_for_the_same_install() {
+        let game = temp("x64-crossroute");
+        assert!(!install(game.to_str().unwrap(), "", Preset::Dx11).failed);
+
+        // An x86 D3D11 install in the same folder must not look like a reinstall of the x64 one.
+        let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        files.insert("dlss5-neural.addon32".into(), b"x86 add-on".to_vec());
+        let mut log = Vec::new();
+        // Different manifest file, so it is a separate install rather than a silent merge.
+        assert!(engine::apply(&game, "D3D11", Route::X86, &files, &mut log).is_ok());
+        assert!(game.join(Route::X64.manifest_name()).is_file());
+        assert!(game.join(engine::MANIFEST_NAME).is_file());
     }
 
     #[test]

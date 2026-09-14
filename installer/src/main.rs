@@ -8,6 +8,7 @@
 #![windows_subsystem = "console"]
 
 mod diag;
+mod engine;
 mod logo;
 mod ui;
 mod work;
@@ -22,7 +23,7 @@ use ratatui::Terminal;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use work::{Preset, Report};
+use work::{Detected, Preset, Report};
 
 // ---------------------------------------------------------------------------------------------
 // Colour, in two parts.
@@ -91,6 +92,8 @@ pub(crate) struct App {
     /// it is metadata and one open() -- and it is the difference between finding out the game is
     /// still running now or after 147 MB have been copied.
     pub(crate) preflight: Report,
+    /// What the target field says about which route applies, recomputed with the preflight.
+    pub(crate) detected: Detected,
     pub(crate) status: String,
     quit: bool,
 }
@@ -104,6 +107,7 @@ impl App {
             focus: Focus::RuntimeDir,
             report: None,
             preflight: Report::new(),
+            detected: Detected::Unknown,
             status: String::new(),
             quit: false,
         };
@@ -112,11 +116,24 @@ impl App {
     }
 
     fn recheck(&mut self) {
+        self.detected = work::detect(&self.game_dir);
+        // The offered list shrinks as soon as the width is known, so the cursor has to come back
+        // inside it rather than point past the end.
+        let offered = self.presets().len();
+        if self.preset >= offered {
+            self.preset = offered - 1;
+        }
         self.preflight = work::preflight(&self.game_dir, &self.runtime_dir, self.preset());
     }
 
+    /// Only the presets that can work for the detected width; everything when nothing is known yet.
+    pub(crate) fn presets(&self) -> &'static [Preset] {
+        Preset::offered(&self.detected)
+    }
+
     pub(crate) fn preset(&self) -> Preset {
-        Preset::ALL[self.preset]
+        let list = self.presets();
+        list[self.preset.min(list.len() - 1)]
     }
 
     fn field_mut(&mut self) -> Option<&mut String> {
@@ -255,10 +272,11 @@ fn on_key(app: &mut App, key: event::KeyEvent) {
         KeyCode::F(5) => app.run(false),
         KeyCode::F(8) => app.run(true),
         KeyCode::Left if app.focus == Focus::Preset => {
-            app.preset = (app.preset + Preset::ALL.len() - 1) % Preset::ALL.len();
+            let n = app.presets().len();
+            app.preset = (app.preset + n - 1) % n;
         }
         KeyCode::Right if app.focus == Focus::Preset => {
-            app.preset = (app.preset + 1) % Preset::ALL.len();
+            app.preset = (app.preset + 1) % app.presets().len();
         }
         // Faster than holding backspace over a long path.
         KeyCode::Char('u') if ctrl => {
@@ -317,6 +335,39 @@ mod tests {
 
     /// Left and right only mean anything on the target row, and they wrap -- including left from
     /// the first entry, which is the one that underflows if the modulo is written carelessly.
+    /// The target row is a ring over a list that changes size underneath it. Landing on the last
+    /// entry of the long list and then having the list shrink is the case that would index past the
+    /// end, so the cursor has to be pulled back in whenever the detection changes.
+    #[test]
+    fn the_target_cursor_is_pulled_back_when_the_detected_width_shrinks_the_list() {
+        let dir = std::env::temp_dir().join("dlss5-installer-test-clamp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut pe = vec![0u8; 512];
+        pe[0] = 0x4d;
+        pe[1] = 0x5a;
+        pe[60] = 128;
+        pe[128] = 0x50;
+        pe[129] = 0x45;
+        pe[132] = 0x4c;
+        pe[133] = 0x01;
+        pe[152] = 0x0b;
+        pe[153] = 0x01;
+        std::fs::write(dir.join("game32.exe"), &pe).unwrap();
+
+        let mut app = App::new();
+        assert_eq!(app.presets().len(), Preset::ALL.len(), "nothing typed yet");
+        app.preset = Preset::ALL.len() - 1;
+
+        app.game_dir = dir.to_string_lossy().to_string();
+        app.recheck();
+
+        assert_eq!(app.detected.route(), Some(work::Route::X86));
+        assert_eq!(app.presets().len(), 3, "a 32-bit target offers only the bridge presets");
+        assert!(app.preset < app.presets().len(), "the cursor must not point past the end");
+        let _ = app.preset(); // would panic on an out-of-range index
+    }
+
     #[test]
     fn presets_wrap_and_only_move_when_the_target_row_has_focus() {
         let mut app = App::new();

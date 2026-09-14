@@ -2,41 +2,78 @@
 
 **THIS IS A PROOF-OF-CONCEPT, NOT EVEN CLOSE TO FINAL VERSION, FORK IT, SHARE IT, LETS GROW TOGETHER**
 
-## v0.4.1
+## v0.5.0
 
-**Native Vulkan games are now part of the validation set.** The Vulkan route now rejects
-non-graphics present queues safely, rebuilds its imported images across swapchain recreation, and
-recovers its D3D12 work slots after a failed reset or close. The same binary completed 9,240 frames
-in Detroit: Become Human without a skip and 3,600 frames in DOOM Eternal with one transient skip
-during a scale change, followed by automatic recovery.
+**32-bit games work now.** A 32-bit game cannot load the 64-bit runtime at all, so the add-on runs
+as a pair instead: a 32-bit frontend inside the game and a 64-bit helper beside it, sharing frames
+on the same adapter and handing the finished frame back in the same frame. D3D11, D3D9 and — through
+the pinned d3d8to9 translator — D3D8 all reach the network this way. It is experimental, and the
+classic D3D9 path pays a fixed few milliseconds a frame that no Resolution Scale can reduce; see
+[the x86 bridge design](docs/x86bridge.md).
+
+Validated live on Half-Life 2 and GTA IV over roughly 37,000 frames without a failure, and on
+Silent Hill 3 through D3D8.
+
+**One installer, for both architectures.** There used to be two: this one, and a separate build for
+32-bit games. There is one now, and it works out which you have by reading the executable rather
+than asking you to know. It offers only the presets that can work for that width, says which
+executable it read, and refuses rather than guesses when a folder holds a 32-bit launcher beside a
+64-bit game.
+
+It also records what it did. An install now writes a manifest of what it installed, what it
+displaced and where the backup went, so uninstall puts things back instead of deleting filenames it
+recognises — and nothing is written at all until every payload, the target folder and every file it
+is about to touch have passed. A game left running stops the install before the first byte rather
+than halfway through a copy.
+
+**`DLSS5_X86BRIDGE_TIMING=1` measures where a frame goes** on the 32-bit routes, splitting the
+bridge into capture, network and return. It is off by default and adds no work of its own. It
+exists because the one performance cliff ever reported here turned out to be a frame-rate cap in
+the game, not the bridge, and guessing had already cost one reverted experiment.
+
+**Nothing changed for D3D11, D3D12 or Vulkan games** beyond the installer. Same add-on, same
+routes, same pinned runtime.
+
+**It requires the pinned v0.2.17 runtime.** v0.2.14 is refused. If you are updating from v0.3.0 you
+must replace `dlssnr_amd_pass1.dll` and `dlssnr_on_amd_weights.bin` — see
+[the three files](#the-three-files) for the hashes. Delete `dlssnr_amd_pass2.dll` and `pass3.dll`
+if you still have them; nothing has used them for several releases.
 
 **One package covers every supported renderer.** There is no separate Vulkan build to choose
-between. The Vulkan transport is compiled in and does nothing on a D3D11 or D3D12 game — it hooks
-one import-table entry, and a game that does not import Vulkan has none. The add-on now links the
-MSVC runtime statically too, so a game's private, older Visual C++ DLLs cannot prevent it loading.
+between, and since this release no separate 32-bit installer either. The Vulkan transport is
+compiled in and does nothing on a D3D11 or D3D12 game — it hooks one import-table entry, and a game
+that does not import Vulkan has none. Everything that a game loads links the MSVC runtime
+statically, so a game's private, older Visual C++ DLLs cannot stop it loading.
 
-**This release requires the pinned v0.2.17 runtime.** v0.2.14 is refused. If you are updating
-from v0.3.0, you must replace `dlssnr_amd_pass1.dll` and `dlssnr_on_amd_weights.bin` — see
-[the three files](#the-three-files) for the hashes. Delete `dlssnr_amd_pass2.dll` and
-`pass3.dll` if you still have them; nothing has used them for two releases.
-
-**Vulkan is still experimental — read [Case 3](#case-3--vulkan-experimental) before trying it.**
-It is validated on RPCS3, Detroit: Become Human and DOOM Eternal. It is known not to work on PCSX2,
+**Vulkan is still experimental — read [Case 3](#case-3--vulkan-experimental) before trying it.** It
+is validated on RPCS3, Detroit: Become Human and DOOM Eternal. It is known not to work on PCSX2,
 for a reason that is structural rather than a bug.
 
-**FSR upscaling is still not implemented**, and this release stops calling it upcoming. The
-measurement that closed it is in [Stuff I didn't get to](#stuff-i-didnt-get-to).
+**FSR upscaling is still not implemented.** The measurement that closed it is in
+[Stuff I didn't get to](#stuff-i-didnt-get-to).
 
-**There is an installer now** — `dlss5-installer.exe` on the release, one screen instead of this
-page. It verifies both hashes before copying, and tells you what would stop the install before it
-starts. See [Or let the installer do it](#or-let-the-installer-do-it). It is new; report anything
-it does wrong the same way as anything else.
+Older releases are in [CHANGELOG.md](CHANGELOG.md).
 
-ReShade add-on that runs the DLSS-NR network on AMD cards.
+## Experimental 32-bit bridge
+
+Shipped in v0.5.0: a native 32-bit D3D9/D3D11 ReShade frontend with a separate 64-bit neural
+host. A 32-bit game cannot load the 64-bit HIP runtime directly, so the
+frontend shares frame textures with the helper on the same GPU adapter and receives the completed
+frame back. D3D9 crosses a private D3D9/D3D11 interop stage before using the same host protocol:
+D3D9Ex uses shared GPU textures, while classic D3D9 uses a bounded CPU-compatible staging fallback.
+
+This route is still under development and is not part of a stable release. D3D9 and D3D11 are
+native frontends and do not require dgVoodoo. Experimental D3D8 support uses the official,
+hash-pinned d3d8to9 compatibility layer to reach the native D3D9 frontend. Build, protocol and IPC
+tests run in CI, while live game/GPU validation remains required. See
+[the x86 bridge design](docs/x86bridge.md) and [installation notes](docs/x86bridge-install.md).
 
 Every tool for DLSS 5 (renodx-dlss, DLSS5-Feeder, DLSS5-Swapper) calls NVIDIA's
 `nvngx_dlssnr.dll`, so none of them do anything on a Radeon. This one drives the AMD port of the
-network instead, from a ReShade add-on.
+network instead, from a ReShade add-on. That port is
+**[DLSS-NR-on-AMD](https://github.com/danielblnc/DLSS-NR-on-AMD)** by danielblnc — it is what makes
+any of this possible, and this project builds on it rather than replacing it. See
+[Credits](#credits).
 
 **The focus is Direct3D 11 games and emulators.** That is not a limitation, it is where this
 works best: D3D11 is the only path where the game's own depth and motion vectors reach the
@@ -54,6 +91,9 @@ Run so far, on an RX 9070 XT:
 | **RPCS3** | Vulkan | 1,879 frames on the v0.4.0 build, after 3,360 on the previous one. Experimental — see Case 3. |
 | **Detroit: Become Human** | Vulkan | 9,240 frames, no skips, repeated toggles and two complete swapchain rebuilds on v0.4.1. |
 | **DOOM Eternal** | Vulkan | 3,600 frames, one transient skip during a scale change, repeated Alt+Tab rebuilds on v0.4.1. Requires a graphics present queue; see Case 3. |
+| **Half-Life 2** | D3D9, 32-bit | 21,600 frames on v0.5.0, no failures. Takes the shared-GPU path, so it does not pay the classic-D3D9 round trip. |
+| **GTA IV** | D3D9, 32-bit | 15,480 frames on v0.5.0, no failures, across twenty enable/disable cycles and an exclusive-fullscreen Alt+Tab. |
+| **Silent Hill 3** | D3D8, 32-bit | Runs through the pinned d3d8to9 translator on v0.5.0, keeping the game's own PC Fix wrapper. Classic D3D9 staging, so it pays that round trip. |
 
 **Anything else is untested, not unsupported.** There is no whitelist and nothing to compile:
 point ReShade at a D3D11, D3D12 or compatible Vulkan host, drop the same three files beside it, and
@@ -114,7 +154,8 @@ channel on the **[discord](https://discord.gg/wYhvS3JSHM)**. They are **not in t
 never will be**: the weights are NVIDIA-derived and the runtime comes from a third-party project
 with its own distribution terms.
 
-The runtime is **DLSS-NR-on-AMD v0.2.17**, rebuilt without the spin cap, so no patching. If you
+The runtime is **[DLSS-NR-on-AMD](https://github.com/danielblnc/DLSS-NR-on-AMD) v0.2.17**, rebuilt
+without the spin cap, so no patching. If you
 would rather build it yourself than trust a file from a chat channel, see
 [Rebuilding the runtime yourself](#rebuilding-the-runtime-yourself): one command, and it needs
 nothing but that project's own installer, which is never executed.
@@ -135,17 +176,31 @@ You also need the **add-on** build of ReShade (labelled "with full add-on suppor
 ## Or let the installer do it
 
 `dlss5-installer.exe`, on the same Releases page, is the three files and the hash check on one
-screen. Pick the target — PCSX2, RPCS3, D3D11, D3D12 or Vulkan — paste the folder holding the two
-files from the discord, paste the folder the game runs from, press F5. The add-on is compiled into
-it, so it cannot hand out one from a different release than the runtime it was built beside, and
-it verifies both SHA-256s before copying anything.
+screen. Paste the folder holding the two files from the discord, point at the game — the folder it
+runs from, or its .exe — and press F5. The add-on is compiled into it, so it cannot hand out one
+from a different release than the runtime it was built beside, and it verifies both SHA-256s
+before copying anything.
+
+**It works out the target's width itself.** It reads the PE header and offers only the presets that
+exist for it: PCSX2, RPCS3, D3D11, D3D12 or Vulkan for a 64-bit game, and the experimental 32-bit
+bridge presets — D3D11, D3D9 or D3D8 — for a 32-bit one. It says which executable it read, and if a
+folder holds a 32-bit launcher beside a 64-bit game it says that too rather than guessing. There is
+one installer for both architectures; the separate x86 build was retired.
 
 Before you press F5 it says what would stop the install: the game still open and holding the
 files, a folder needing administrator rights, no room for the weights, ReShade missing or
 installed twice, and the `DisabledAddons=` line further down this page — the one that makes the
-add-on silently never load. F8 takes everything back out and leaves `dlss5-neural.ini` alone.
+add-on silently never load. The first three are refusals, not warnings: nothing is written until
+they pass, so a failed install cannot leave half of one behind.
 
-It does **not** install ReShade, and is not going to. That stays ReShade's own installer.
+What does get written is recorded — what it installed, what it displaced, and where the backup of
+it went. F8 reads that back, puts any displaced file where it was, and leaves `dlss5-neural.ini`
+alone along with anything you changed after installing.
+
+It does **not** install ReShade on the 64-bit routes, and is not going to. That stays ReShade's own
+installer. The 32-bit bridge is the one exception, and only when a release carries the pinned
+ReShade sidecar: it never downloads anything and never runs ReShade's setup, and a public release
+without that sidecar behaves exactly like the rest — you install ReShade, it checks the hash.
 
 The rest of this section is the same thing by hand, which is worth reading either way: the
 installer copies files, it does not tell you which renderer to set.
@@ -255,8 +310,8 @@ from a previous install, remove it: two ReShade instances in one process is not 
 arrangement.
 
 DOOM Eternal normally presents from an async queue. Set `r_presentFromAsync "0"` so presentation
-uses a graphics-capable queue; otherwise v0.4.1 logs the unsupported queue and leaves the game's
-image untouched. A resize, display-mode change or Alt+Tab may recreate the swapchain. The Vulkan
+uses a graphics-capable queue; otherwise the add-on logs the unsupported queue and leaves the
+game's image untouched. A resize, display-mode change or Alt+Tab may recreate the swapchain. The Vulkan
 bridge now retires and rebuilds every imported image in that case, including when the new
 swapchain has the same dimensions and format.
 
@@ -696,6 +751,26 @@ What support actually buys, in the order it would get spent:
 
 If this saved you a weekend, or if you just want to see where it goes, a coffee genuinely helps.
 If it didn't, don't — the code is MIT either way and nothing is gated behind a donation.
+
+## Credits
+
+This add-on is downstream of **[DLSS-NR-on-AMD](https://github.com/danielblnc/DLSS-NR-on-AMD)** by
+**danielblnc**. That project is the one that got DLSS 5's neural rendering running on Radeon at
+all: it produces both files this add-on cannot work without —
+
+- `dlssnr_amd_pass1.dll`, the runtime that executes the network;
+- `dlssnr_on_amd_weights.bin`, the weights it runs.
+
+Neither is reimplemented here and neither is redistributed here. What this repository adds is a
+ReShade add-on around that runtime: the D3D11, D3D12 and Vulkan routes, the 32-bit bridge, the
+guide capture, the overlay and the installer. Take the network away and there is nothing left to
+drive.
+
+If you found this project first, go and look at that one. It has its own terms; this repository's
+MIT licence covers only the code in it, not the runtime or the weights.
+
+Thanks also to everyone who ran a build against a game and sent back a log — several of the fixes
+in the changelog exist only because somebody bothered to report what they saw.
 
 ## License
 

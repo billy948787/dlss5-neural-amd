@@ -3,9 +3,10 @@
 #   ERROR-DIALOG - the game's own DirectX box
 #   NO-FRAMES    - the add-on came up but never processed a frame
 #   PROCESS-EXITED / TIMEOUT
-param([int]$MaxSeconds = 60, [string]$Ini = '', [int]$FrameGrace = 20)
+param([int]$MaxSeconds = 60, [string]$Ini = '', [int]$FrameGrace = 20, [string]$GamePath = '')
 
-$nfs = 'D:\SteamLibrary\steamapps\common\Need for Speed'
+. (Join-Path $PSScriptRoot 'find-steam-game.ps1')
+$nfs = Find-SteamGame -Name 'Need for Speed' -Explicit $GamePath -EnvName 'DLSS5_NFS_PATH'
 Get-Process NFS16 -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 8
 
