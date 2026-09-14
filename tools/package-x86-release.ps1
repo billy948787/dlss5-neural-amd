@@ -3,8 +3,14 @@ param([switch]$Private,[string]$OutputPath='')
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $release=Join-Path $root 'release'
-foreach($name in @('dlss5-installer.exe','files/dlss5-neural.addon32','files/dlss5-neural-host64.exe','payload.sha256')){
+# The bridge payloads come from build-x86bridge.ps1; the installer is built separately, in
+# installer/. Name the right script for whichever is missing rather than sending someone to run
+# the one that was never going to produce it.
+foreach($name in @('files/dlss5-neural.addon32','files/dlss5-neural-host64.exe','payload.sha256')){
     if(!(Test-Path -LiteralPath (Join-Path $release $name))){throw "Run build-x86bridge.ps1 first; missing $name"}
+}
+if(!(Test-Path -LiteralPath (Join-Path $release 'dlss5-installer.exe'))){
+    throw 'Run installer/build.ps1 and copy its dlss5-installer.exe into release/ first.'
 }
 $stage=Join-Path ([IO.Path]::GetTempPath()) ('dlss5-x86-release-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path (Join-Path $stage 'files') -Force | Out-Null
