@@ -259,12 +259,28 @@ land inside the `IDirect3DDevice9::Reset` window that section 4.3 exists to keep
 contract test in `tools/test-x86bridge.py` pins it and also guards that the reverted experiment's
 identifiers stay absent.
 
-Representative classic-D3D9 figures at 1920x1080, from the reverted build's own instrumentation:
-`input+prepare` 2.7 ms, `host` 9.1 ms, `output` 3.3 ms, total 15.0 ms. The reading that matters is
-that `input+prepare` plus `output` is about 6 ms of fixed transport, a full frame crossing
-CPU-visible memory in each direction, and it does not shrink when Resolution Scale drops -- only
-`host` does. Half-Life 2 reaches `shared GPU staging` instead and avoids most of it, which is why
-D3D9Ex promotion is the change worth pursuing rather than saving neural pixels.
+**Measured on Silent Hill 3 through the real D3D8 route**, 2,160 frames at 1920x1080 with no
+failures, across 18 windows of 120 frames:
+
+| | min | max | mean | spread |
+|---|---|---|---|---|
+| `host` | 9.93 ms | 40.76 ms | 12.98 ms | 30.83 ms |
+| transport (`input+prepare` + `output`) | 5.30 ms | 5.82 ms | 5.56 ms | **0.52 ms** |
+
+That is the finding: **`host` swung 4.1x while transport moved half a millisecond.** The transport
+cost is independent of what the network costs. The swing came from warm-up at scale 1.00 settling
+into steady state at 960x540, which covered a far wider range than deliberately stepping through
+Resolution Scale values would have.
+
+Steady state at scale 0.50: `host` 9.97 ms, transport 5.55 ms, total about 15.5 ms.
+
+So the classic path has a floor. Transport is roughly 36% of a 60 FPS budget spent only moving
+pixels, it never shrinks, and lowering Resolution Scale does not touch it -- even with the network
+free, this route cannot go below about 5.5 ms per frame. Half-Life 2 reaches `shared GPU staging`
+and does not pay it. That is the measured case for D3D9Ex promotion over saving neural pixels.
+
+How much of the 5.5 ms D3D9Ex actually removes is still unmeasured; the probe labels the staging
+path on its own line, so a promoted Silent Hill 3 answers it directly.
 
 ### 4.6 Open: D3D9 reference count at process exit
 
@@ -326,6 +342,24 @@ satisfy the production installer's official-release hash, and it is still what t
 carries as `d3d8R.dll`. Installing through the installer replaces it with the official binary. Do
 not weaken the production hash check to accept arbitrary local builds.
 
+**Installed through the installer and verified live.** The D3D8 preset was run against the real
+game with the official translator present. A read-only `plan()` rehearsal first confirmed the file
+map, then the install ran and was checked by hash:
+
+- the PC Fix `d3d8.dll` was left byte-identical, chosen by the chaining rule reading the real
+  wrapper rather than a synthetic one;
+- the official translator replaced the locally built `d3d8R.dll`;
+- ReShade, runtime and weights reported `IDENTICAL` and were not rewritten;
+- `dlss5-neural.ini` and `ReShade.ini` were preserved;
+- the manifest records the replaced files as owned, including the pre-experiment pair
+  `4a9401ca`/`29284b5f`, so that rollback state is now held by the installer's own backup scheme.
+
+The game then ran 2,160 frames with `LUID MATCH`, `probe=on` and no failures, confirming the whole
+chain `sh3.exe -> PC Fix d3d8.dll -> official d3d8R.dll -> ReShade d3d9.dll -> addon32 -> host64`
+in the configuration a user would actually receive. Note the installer executable is `wWinMain`
+only; its Install button calls `app.install(target, preset)` and that call is what was exercised,
+so the GUI itself remains an unvalidated manual test.
+
 Silent Hill 3 live result before the rejected performance experiment:
 
 - ReShade loaded through `d3d9.dll`;
@@ -351,7 +385,7 @@ Silent Hill 3 live result before the rejected performance experiment:
 | Eden Nintendo Switch emulator | Vulkan x64 | Works. Missing panel was Windows Defender quarantining/deleting the addon, not a code regression. |
 | Half-Life 2 | D3D9 x86 | Works through native D3D9 bridge. ReShade BasePath points to `bin`; binaries/logs that matter are in `Half-Life 2\bin`, not only the root. Host64 packaging/availability was corrected. Revalidated on the committed tree: 21,600 frames, every frame `result=1`, no faults, one reset handled. Uses `shared GPU staging`, so it exercises the D3D9Ex path the other two titles do not. |
 | GTA IV | D3D9 x86 | Works after Reset/Alt+Tab lifecycle fix. Avoid waits/queries/IPC during `IDirect3DDevice9::Reset`. Transient device-lost frames must not permanently fault the bridge. Revalidated on the committed tree: 15,480 frames, every frame `result=1`, no faults, 20 disable/enable cycles, one reset handled by the deferred path. Classic CPU-compatible staging. |
-| Silent Hill 3 | D3D8 x86 | Works through PC Fix -> `d3d8R.dll` d3d8to9 -> ReShade D3D9 -> x86 bridge. The reported 0.35/0.36 cliff was the PC Fix frame-rate cap, not the bridge: unlocking it (`FPSMode = 4`) normalised the frame rate with no code change. Attempted raster alignment was rejected and reverted. See 4.2, including what `FPSMode = 4` costs in the Mirror Room. |
+| Silent Hill 3 | D3D8 x86 | Works through PC Fix -> `d3d8R.dll` d3d8to9 -> ReShade D3D9 -> x86 bridge. The reported 0.35/0.36 cliff was the PC Fix frame-rate cap, not the bridge: unlocking it (`FPSMode = 4`) normalised the frame rate with no code change. Attempted raster alignment was rejected and reverted. See 4.2, including what `FPSMode = 4` costs in the Mirror Room. Installed through the installer with the official pinned translator and revalidated: 2,160 frames, no failures, PC Fix preserved. Stage-probe figures in 4.5. |
 | NFS 2015 | D3D11 x64 | Existing documented validation: 1,205 frames, one skip, no failures. |
 | GTA V Enhanced | D3D12 x64 | Existing documented validation: 23,663 frames, no failures; demonstrated stale-residual trail on skipped frames, later fixed by outputting the untouched game frame on skips. |
 | RPCS3 | Vulkan x64 | Existing documented validation: full bridge round trip. Static `vkCreateDevice` import is compatible. |
@@ -487,10 +521,9 @@ artifacts and logs.
 Items 1 and 3 of the original list are done: the dirty diff was separated into the commits listed
 in section 1, and GTA IV and Half-Life 2 were revalidated on the committed tree (section 6).
 
-1. Install Silent Hill 3 through the x86 installer's D3D8 preset now that the pinned sidecar is
-   present, and confirm live what the fixture only proves synthetically: the PC Fix `d3d8.dll` is
-   preserved, the official translator lands as `d3d8R.dll`, the panel appears and uninstall puts
-   the wrapper back. The game currently carries the locally compiled translator instead.
+1. Exercise the D3D8 uninstall live. Installation is now validated (section 5), but the uninstall
+   path -- restoring the locally built `d3d8R.dll` from the installer's backup and leaving the PC
+   Fix `d3d8.dll` alone -- has only been proven against synthetic files.
 2. Investigate D3D9Ex promotion/shared-handle feasibility for true D3D8/D3D9 games. This is now the
    highest-value performance item: section 4.5 puts about 6 ms of fixed CPU round trip on the
    classic path, Half-Life 2 already proves the shared path works, and no amount of neural-pixel
