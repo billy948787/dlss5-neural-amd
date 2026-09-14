@@ -20,6 +20,14 @@
   portable protocol/control tests on Linux.
 - Honor ReShade's `[INSTALL] BasePath` when it safely points inside the selected game directory,
   including Source-engine layouts that load the D3D9 proxy from `bin`.
+- Keep the x86 D3D9 frontend alive across `IDirect3DDevice9::Reset`. ReShade emits
+  `destroy_swapchain` from inside the driver's reset, where submitting an event query, waiting on
+  either private GPU device or running IPC re-enters `amdxx32.dll` and crashed GTA IV on
+  exclusive-fullscreen Alt+Tab. That branch now only releases the D3D9 default-pool resources and
+  defers remote-generation retirement to the next stable presentation.
+- Return HRESULTs from the x86 D3D9 staging operations. A transient `D3DERR_DEVICELOST` or
+  `D3DERR_DEVICENOTRESET` is treated as an interrupted reset frame that keeps the host connected
+  and resets history on recovery, instead of permanently faulting the bridge.
 - D3D8 is temporarily unavailable until it has a native or otherwise safe maintained route.
 
 ## v0.4.1 — Native Vulkan game stability

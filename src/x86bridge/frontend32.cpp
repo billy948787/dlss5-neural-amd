@@ -194,6 +194,22 @@ void StopHost(){
     g.job.reset();g.process.reset();g.built=false;g.reset=true;
 }
 void Fault(const char* reason){Log("x86bridge ORIGINAL: %s (win32=%lu)",reason,GetLastError());g.failed=true;StopHost();}
+void FaultHresult(const char* reason,HRESULT hr){Log("x86bridge ORIGINAL: %s (hr=0x%08lX)",reason,static_cast<unsigned long>(hr));g.failed=true;StopHost();}
+bool DeferD3D9Failure(const char* operation,HRESULT operationHr){
+    if(!g.game9)return false;
+    const HRESULT cooperativeHr=g.game9->TestCooperativeLevel();
+    const bool resetting=operationHr==D3DERR_DEVICELOST||operationHr==D3DERR_DEVICENOTRESET||
+        cooperativeHr==D3DERR_DEVICELOST||cooperativeHr==D3DERR_DEVICENOTRESET;
+    if(!resetting)return false;
+    Log("x86bridge D3D9 %s skipped during device reset (operation=0x%08lX cooperative=0x%08lX)",
+        operation,static_cast<unsigned long>(operationHr),static_cast<unsigned long>(cooperativeHr));
+    // This is the normal exclusive-fullscreen Alt+Tab lifecycle, not a bridge failure. Keep the
+    // host connected, discard this interrupted frame and make the next generation reset history.
+    // destroy_swapchain releases the default-pool resources; the next stable present retires the
+    // old remote generation and rebuilds it.
+    g.reset=true;
+    return true;
+}
 bool DropRemote(){
     if(!g.built)return !g.failed;
     x86bridge::Ack a;
@@ -499,7 +515,7 @@ bool InitD3D9Bridge(device *reshadeDevice)
     return true;
 }
 
-bool FlushAndWait9();
+HRESULT FlushAndWait9();
 bool FlushAndWait11();
 
 bool EnsureD3D9Stage(UINT width, UINT height, D3DFORMAT format, DXGI_FORMAT &dxgiFormat)
@@ -592,24 +608,25 @@ bool EnsureD3D9Stage(UINT width, UINT height, D3DFORMAT format, DXGI_FORMAT &dxg
     return true;
 }
 
-bool UploadD3D9Frame(IDirect3DSurface9 *backBuffer)
+HRESULT UploadD3D9Frame(IDirect3DSurface9 *backBuffer)
 {
-    if (FAILED(g.game9->StretchRect(backBuffer, nullptr, g.stageInSurface9.Get(), nullptr,
-            D3DTEXF_NONE)))
-        return false;
+    HRESULT hr = g.game9->StretchRect(backBuffer, nullptr, g.stageInSurface9.Get(), nullptr,
+        D3DTEXF_NONE);
+    if (FAILED(hr))
+        return hr;
     if (g.d3d9Shared)
     {
-        if (!FlushAndWait9())
-            return false;
+        if (FAILED(hr = FlushAndWait9()))
+            return hr;
         g.game11ctx->CopyResource(g.stageIn11.Get(), g.sharedIn11.Get());
-        return true;
+        return S_OK;
     }
-    if (FAILED(g.game9->GetRenderTargetData(g.stageInSurface9.Get(), g.readback9.Get())))
-        return false;
+    if (FAILED(hr = g.game9->GetRenderTargetData(g.stageInSurface9.Get(), g.readback9.Get())))
+        return hr;
     D3DLOCKED_RECT source {};
     D3D11_MAPPED_SUBRESOURCE destination {};
-    if (FAILED(g.readback9->LockRect(&source, nullptr, D3DLOCK_READONLY)))
-        return false;
+    if (FAILED(hr = g.readback9->LockRect(&source, nullptr, D3DLOCK_READONLY)))
+        return hr;
     const HRESULT mapped = g.game11ctx->Map(g.cpuIn11.Get(), 0, D3D11_MAP_WRITE, 0, &destination);
     const size_t rowBytes = static_cast<size_t>(g.stage9W) * 4;
     if (FAILED(mapped) || source.Pitch <= 0 || static_cast<size_t>(source.Pitch) < rowBytes ||
@@ -618,7 +635,7 @@ bool UploadD3D9Frame(IDirect3DSurface9 *backBuffer)
         if (SUCCEEDED(mapped))
             g.game11ctx->Unmap(g.cpuIn11.Get(), 0);
         g.readback9->UnlockRect();
-        return false;
+        return FAILED(mapped) ? mapped : E_UNEXPECTED;
     }
     for (UINT y = 0; y < g.stage9H; ++y)
         std::memcpy(static_cast<unsigned char *>(destination.pData) + destination.RowPitch * y,
@@ -626,26 +643,27 @@ bool UploadD3D9Frame(IDirect3DSurface9 *backBuffer)
     g.game11ctx->Unmap(g.cpuIn11.Get(), 0);
     g.readback9->UnlockRect();
     g.game11ctx->CopyResource(g.stageIn11.Get(), g.cpuIn11.Get());
-    return true;
+    return S_OK;
 }
 
-bool DownloadD3D9Frame(IDirect3DSurface9 *backBuffer)
+HRESULT DownloadD3D9Frame(IDirect3DSurface9 *backBuffer)
 {
     if (g.d3d9Shared)
     {
         g.game11ctx->CopyResource(g.sharedOut11.Get(), g.stageOut11.Get());
         if (!FlushAndWait11())
-            return false;
+            return E_FAIL;
     }
     else
     {
         g.game11ctx->CopyResource(g.cpuOut11.Get(), g.stageOut11.Get());
         if (!FlushAndWait11())
-            return false;
+            return E_FAIL;
         D3D11_MAPPED_SUBRESOURCE source {};
         D3DLOCKED_RECT destination {};
-        if (FAILED(g.game11ctx->Map(g.cpuOut11.Get(), 0, D3D11_MAP_READ, 0, &source)))
-            return false;
+        HRESULT hr = g.game11ctx->Map(g.cpuOut11.Get(), 0, D3D11_MAP_READ, 0, &source);
+        if (FAILED(hr))
+            return hr;
         const HRESULT locked = g.upload9->LockRect(&destination, nullptr, 0);
         const size_t rowBytes = static_cast<size_t>(g.stage9W) * 4;
         if (FAILED(locked) || destination.Pitch <= 0 ||
@@ -655,37 +673,42 @@ bool DownloadD3D9Frame(IDirect3DSurface9 *backBuffer)
             if (SUCCEEDED(locked))
                 g.upload9->UnlockRect();
             g.game11ctx->Unmap(g.cpuOut11.Get(), 0);
-            return false;
+            return FAILED(locked) ? locked : E_UNEXPECTED;
         }
         for (UINT y = 0; y < g.stage9H; ++y)
             std::memcpy(static_cast<unsigned char *>(destination.pBits) + destination.Pitch * y,
                 static_cast<const unsigned char *>(source.pData) + source.RowPitch * y, rowBytes);
         g.upload9->UnlockRect();
         g.game11ctx->Unmap(g.cpuOut11.Get(), 0);
-        if (FAILED(g.game9->UpdateSurface(g.upload9.Get(), nullptr, g.stageOutSurface9.Get(), nullptr)))
-            return false;
+        if (FAILED(hr = g.game9->UpdateSurface(g.upload9.Get(), nullptr, g.stageOutSurface9.Get(), nullptr)))
+            return hr;
     }
-    return SUCCEEDED(g.game9->StretchRect(g.stageOutSurface9.Get(), nullptr, backBuffer, nullptr,
-               D3DTEXF_NONE)) && FlushAndWait9();
+    HRESULT hr = g.game9->StretchRect(g.stageOutSurface9.Get(), nullptr, backBuffer, nullptr,
+        D3DTEXF_NONE);
+    return FAILED(hr) ? hr : FlushAndWait9();
 }
 
-bool FlushAndWait9()
+HRESULT FlushAndWait9()
 {
     if (g.game9 == nullptr)
-        return false;
+        return E_POINTER;
     ComPtr<IDirect3DQuery9> query;
-    if (FAILED(g.game9->CreateQuery(D3DQUERYTYPE_EVENT, &query)) || query == nullptr ||
-        FAILED(query->Issue(D3DISSUE_END)))
-        return false;
+    HRESULT hr = g.game9->CreateQuery(D3DQUERYTYPE_EVENT, &query);
+    if (FAILED(hr))
+        return hr;
+    if (query == nullptr)
+        return E_UNEXPECTED;
+    if (FAILED(hr = query->Issue(D3DISSUE_END)))
+        return hr;
     const ULONGLONG end = GetTickCount64() + 2000;
-    HRESULT hr = S_FALSE;
+    hr = S_FALSE;
     while ((hr = query->GetData(nullptr, 0, D3DGETDATA_FLUSH)) == S_FALSE)
     {
         if (GetTickCount64() > end)
-            return false;
+            return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
         Sleep(0);
     }
-    return hr == S_OK;
+    return hr;
 }
 
 bool LooksLikeMotion(const D3D11_TEXTURE2D_DESC &d, UINT screenW, UINT screenH)
@@ -884,6 +907,25 @@ void OnInit(swapchain* sc,bool){
 void OnDestroy(swapchain* sc,bool resize){
     std::lock_guard lock(g.lock);if(sc!=g.active)return;
     Log("x86bridge retiring swapchain resize=%d",resize);
+
+    // ReShade calls destroy_swapchain from inside IDirect3DDevice9::Reset. At that point the
+    // native D3D9 device is already transitioning through its lost/reset state. Submitting an
+    // event query here (or waiting on either private GPU device) can re-enter the display driver
+    // while it is resetting. GTA IV's exclusive-fullscreen Alt+Tab path fails fast in amdxx32.dll
+    // when that happens.
+    //
+    // Every successful D3D9 presentation has already drained the D3D11 copies and the final
+    // StretchRect before returning, so there is no work left to wait for here. Release the D3D9
+    // default-pool resources immediately, as Reset requires, and leave the host's imported shared
+    // resources alive. The first stable presentation after Reset calls Bridge::Ensure, which sends
+    // DROP before allocating the replacement generation. This keeps all IPC and GPU waits outside
+    // the driver's reset callback.
+    if(resize&&g.nativeD3D9){
+        ReleaseLocal();
+        Log("x86bridge swapchain retired resize=1 (D3D9 reset; remote retirement deferred)");
+        return;
+    }
+
     DropRemote();
     if(g.game11ctx){FlushAndWait11();g.game11ctx->ClearState();g.game11ctx->Flush();}
     if(g.nativeD3D9)FlushAndWait9();
@@ -948,7 +990,8 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
     g.outWidth=width;g.outHeight=height;
     if(!g.colour.Ensure(g.game11.Get(),width,height,format)||!g.output.Ensure(g.game11.Get(),width,height,format)||!EnsureStage(width,height,format)){Fault("colour/staging resources unavailable");return;}
     if(g.nativeD3D9){
-        if(!UploadD3D9Frame(bb9.Get())){Fault("D3D9 input copy did not complete");return;}
+        const HRESULT uploadHr=UploadD3D9Frame(bb9.Get());
+        if(FAILED(uploadHr)){if(DeferD3D9Failure("input copy",uploadHr))return;FaultHresult("D3D9 input copy did not complete",uploadHr);return;}
     }else g.game11ctx->CopyResource(g.stageIn11.Get(),bb.Get());
     g.game11ctx->CopyResource(g.colour.on11.Get(),g.stageIn11.Get());
     SettleGuide(g.guideDepth,g_depthTally);SettleGuide(g.guideMotion,g_motionTally);
@@ -967,7 +1010,8 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
         if(FAILED(g.game11->GetDeviceRemovedReason())){Fault("D3D11 device removed");return;}
         g.game11ctx->CopyResource(g.stageOut11.Get(),g.output.on11.Get());
         if(g.nativeD3D9){
-            if(!DownloadD3D9Frame(bb9.Get())){Fault("D3D9 output copy did not complete");return;}
+            const HRESULT downloadHr=DownloadD3D9Frame(bb9.Get());
+            if(FAILED(downloadHr)){if(DeferD3D9Failure("output copy",downloadHr))return;FaultHresult("D3D9 output copy did not complete",downloadHr);return;}
         }else{
             g.game11ctx->CopyResource(bb.Get(),g.stageOut11.Get());
             if(!FlushAndWait11()){Fault("return D3D11 queue not drained");return;}

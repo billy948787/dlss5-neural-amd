@@ -32,8 +32,23 @@ for body in re.findall(r'struct \w+\s*\{(.*?)\};',ipc,re.S):
 present=f[f.index('void OnPresent('):f.index('\n}\nextern "C"')]
 assert present.index('CopyResource(g.stageIn11')<present.index('CopyResource(g.colour.on11')<present.index('FlushAndWait11()')<present.index('Kind::Frame,&f')<present.index('Confirmed(a,f,g.transport)')<present.index('CopyResource(g.stageOut11')<present.index('CopyResource(bb.Get(),g.stageOut11')
 assert present.index('UploadD3D9Frame(bb9.Get())')<present.index('Kind::Frame,&f')<present.index('DownloadD3D9Frame(bb9.Get())')
+assert present.count('DeferD3D9Failure(')==2 and present.count('FaultHresult(')==2
+recover_start=f.index('bool DeferD3D9Failure(')
+recover=f[recover_start:f.index('bool DropRemote(',recover_start)]
+assert 'TestCooperativeLevel()' in recover and 'D3DERR_DEVICELOST' in recover and 'D3DERR_DEVICENOTRESET' in recover
+assert 'g.reset=true;' in recover and 'StopHost(' not in recover and 'g.failed=true' not in recover
+assert 'HRESULT UploadD3D9Frame(' in f and 'HRESULT DownloadD3D9Frame(' in f and 'HRESULT FlushAndWait9()' in f
 assert 'mods&g.toggleMods' in present and 'IsIconic' in present and 'g.reset=true' in present
 assert 'g.game11ctx->ClearState()' in f
+# D3D9 Reset is already in progress when ReShade emits destroy_swapchain. Its resize branch must
+# release default-pool resources without IPC, submitting queries or waiting on either GPU. Remote
+# retirement is deferred until Bridge::Ensure runs from the next stable presentation.
+destroy=f[f.index('void OnDestroy('):f.index('void OnPresent(')]
+d3d9_reset=destroy[destroy.index('if(resize&&g.nativeD3D9)'):destroy.index('\n    }',destroy.index('if(resize&&g.nativeD3D9)'))]
+assert 'ReleaseLocal();' in d3d9_reset and 'return;' in d3d9_reset
+for unsafe in ['DropRemote(', 'FlushAndWait9(', 'FlushAndWait11(', 'ClearState(', 'Flush(']:
+ assert unsafe not in d3d9_reset,unsafe
+assert destroy.index('if(resize&&g.nativeD3D9)')<destroy.index('DropRemote();')
 assert 'const std::wstring name=L"\\\\\\\\.\\\\pipe\\\\dlss5-x86bridge-"' in f
 # Verify the copied job-pending decision has identical executable text to upstream.
 u=read(root/'src/neural/neural.cpp')
