@@ -55,11 +55,26 @@ jobs:
           path: |
             build-x86bridge/dlss5-neural.addon32
             build-x86bridge/dlss5-neural-host64.exe
-            build-x86bridge/dlss5-installer-x86.exe
             build-x86bridge/protocol-test-*.log
             build-x86bridge/io-test-*.log
             build-x86bridge/imports-*.txt
             build-x86bridge/SHA256SUMS.txt
+
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The add-on is embedded into the installer, so it has to exist before cargo runs.
+      - name: Build the add-on the installer embeds
+        shell: pwsh
+        run: .uild.ps1 -Target neural
+
+      - name: Test the installer
+        working-directory: installer
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
 
   x86-contracts:
     runs-on: ubuntu-latest

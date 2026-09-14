@@ -1,12 +1,12 @@
 # Merging the two installers
 
-There are two installers today. `installer/` is Rust with a ratatui terminal UI and covers the x64
-routes; `installer-x86/` is C++ with a hand-drawn Win32 GUI and covers the x86 bridge. They do not
-share a line of code, and each has safety the other lacks. This is the plan to make them one.
+**This merge is done.** There is one installer, `installer/`, and it covers both the x64 routes and
+the x86 bridge. The C++ `installer-x86/` it replaced has been retired.
 
-It records the decisions so the work does not start by re-litigating them. Steps 1 and 2 of the
-sequence are implemented; the table below still describes the two installers as they were when this
-was written, which is the state the remaining steps start from.
+The document is kept as the record of why it was built this way. There were two installers: Rust
+with a ratatui terminal UI covering x64, and C++ with a hand-drawn Win32 GUI covering the bridge.
+They shared no code, and each had safety the other lacked. The table below describes them as they
+were, which is what the decisions were made against.
 
 ## Where they differ today
 
@@ -161,11 +161,19 @@ it:
 3. Fold the preflight in front of both routes.
 4. Replace the preset list with detected bitness plus the reduced API list, keeping PCSX2 and RPCS3
    as named targets.
-5. Retire `installer-x86/`, and keep one release artifact. **Do this only after the Rust bridge
-   route has been used on a real game.** Until then the C++ tool is the fallback, and deleting a
-   fallback before its replacement has been proven in the field is the wrong order. It is still
-   built by `build-x86bridge.ps1`, packaged by `tools/package-x86-release.ps1` and published by CI,
-   so retiring it is four edits and a directory removal once that is done.
+5. Retire `installer-x86/`, and keep one release artifact. Done, after the Rust bridge route was
+   used on a real game -- D3D8 and D3D11 both installed correctly -- rather than before.
+
+   Two things that retirement turned up. The C++ fixture's 63 assertions were checked one by one
+   against the Rust suite instead of comparing counts, and eleven behaviours had no equivalent:
+   the fresh tuning defaults, proxy selection per API, reinstall idempotence, tuning preserved
+   across reinstall and uninstall, a pre-existing ini never touched, a DLL replaced after install
+   being kept, each payload refused by hash before anything is written, D3D8 failing closed without
+   its translator, and the legacy D3D9 manifest. Those were written before anything was deleted.
+
+   And CI ran no cargo at all: the installer's only automated coverage there was the C++ fixture
+   inside `build-x86bridge.ps1`. Removing it without adding an `installer` job would have dropped
+   that coverage to nothing while every check still looked green.
 
 Steps 1 to 3 are invisible to the user and independently verifiable. Only step 4 changes the flow,
 which is the right order: the risky part ships last, on top of an engine already proven.

@@ -406,8 +406,7 @@ Paths are relative to the repository root.
 | `src/vkbridge` | Vulkan bridge components. |
 | `src/vkprobe` | Vulkan diagnostics. |
 | `src/vkshared` | Vulkan shared code/resources. |
-| `installer` | Main Rust installer. |
-| `installer-x86` | Separate native x86 installer. |
+| `installer` | The installer, Rust, covering both the x64 routes and the x86 bridge. The separate C++ `installer-x86` it replaced was retired; see `docs/installer-merge.md`. |
 | `external/reshade` | Vendored ReShade headers. |
 | `external/minhook` | Vendored MinHook source/license. |
 | `tools` | Build, validation, import and packaging scripts. |

@@ -8,7 +8,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-x86bridge.ps1
 
 The script compiles addon32 x86 /MT, host64 x64 /MT and the new installer x64 /MT, tests the protocol on both architectures, checks PE/import boundaries, and builds the current integrated addon64 from the same checkout. It places the new pair and installer in `release/`. With the private sidecars present, it also runs installer filesystem tests there. Those tests use synthetic PE targets, never the real game folder.
 
-Open `release/dlss5-installer-x86.exe`, browse to the actual x86 executable and select D3D11, D3D9 or the experimental D3D8 preset. PE32+ targets are rejected. API selection is manual; import-based autodetection was not added. Close the game before install/uninstall. If ReShade's root `ReShade.ini` contains an `[INSTALL] BasePath` inside the selected game directory, the installer safely follows it; this supports Source-engine layouts that load the proxy and add-ons from `bin`.
+Open `release/dlss5-installer.exe` -- one installer for both architectures since the separate x86 build was retired. Point field 2 at the game: it reads the PE header, says which width it found, and offers only the presets that exist for it. For a 32-bit target that is D3D11, D3D9 or the experimental D3D8 preset, and it wants the executable rather than the folder because it verifies the header before it plans. Field 1 takes the release folder, or the folder holding the runtime and weights. PE32+ targets are rejected. API selection is manual; import-based autodetection was not added. Close the game before install/uninstall. If ReShade's root `ReShade.ini` contains an `[INSTALL] BasePath` inside the selected game directory, the installer safely follows it; this supports Source-engine layouts that load the proxy and add-ons from `bin`.
 
 ## Defaults and UI
 
@@ -47,4 +47,4 @@ Local checklist (no game-specific production code):
 2. Silent Hill 3 or another true D3D8 x86 title: select D3D8 and verify that the game loads `d3d8.dll`, ReShade loads through `d3d9.dll`, the add-on panel appears and the log reports the native D3D9 frontend. Test fullscreen/window transitions and Alt+Tab.
 3. Check 1/2 passes and live controls. Fresh install Colour Strength=0.25; new panel docked. Undock, restart/reinstall and verify personal layout remains.
 4. Change tuning; Save. Change again; Factory Defaults. Confirm INI unchanged by Factory and preferences preserved. Reload must recover the last Save.
-5. Test uninstall in a copied game folder first; inspect retained config/backups. Send installer-x86.log, frontend/host logs and build/import/protocol logs.
+5. Test uninstall in a copied game folder first; inspect retained config/backups. Send the installer log, frontend/host logs and build/import/protocol logs.

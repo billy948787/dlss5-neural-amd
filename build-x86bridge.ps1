@@ -101,30 +101,15 @@ try {
         if($text -match '(?i)(VCRUNTIME|MSVCP|libgcc|libstdc\+\+)'){throw "Unexpected C++ DLL dependency: $arch"}
         if($arch -eq 'x86' -and $text -match '(?i)(d3d12\.dll|amdhip64_7\.dll|dlssnr_amd_pass1\.dll)'){throw 'Forbidden frontend import'}
     }
-    # New installer stays outside the immutable upstream installer/ directory.
-    $installer=Join-Path $out 'dlss5-installer-x86.exe'
-    & $cl @flags (Join-Path $root 'installer-x86/main.cpp') "/Fo$out\installer-x86.obj" /link /SUBSYSTEM:WINDOWS "/OUT:$installer" user32.lib comdlg32.lib gdi32.lib bcrypt.lib 2>&1 | Tee-Object -FilePath (Join-Path $out 'installer-build.log')
-    if($LASTEXITCODE -ne 0){throw 'x86-route installer compile failed'}
-    PE $installer 0x8664
-    $installerTest=Join-Path $out 'installer-tests.exe'
-    & $cl @flags (Join-Path $root 'installer-x86/tests.cpp') "/Fo$out\installer-tests.obj" /link "/OUT:$installerTest" bcrypt.lib 2>&1 | Tee-Object -FilePath (Join-Path $out 'installer-tests-build.log')
-    if($LASTEXITCODE -ne 0){throw 'Installer tests compile failed'}
+    # The bridge payloads are staged for the installer, which lives in installer/ and is built and
+    # tested with cargo. The C++ installer that used to be compiled here was retired once the Rust
+    # one covered both routes; its fixture moved into installer/src/engine.rs.
     $release=Join-Path $root 'release'
     New-Item -ItemType Directory -Force -Path (Join-Path $release 'files') | Out-Null
-    Copy-Item -LiteralPath $installer -Destination $release -Force
     foreach($name in @('dlss5-neural.addon32','dlss5-neural-host64.exe')){
         Copy-Item -LiteralPath (Join-Path $out $name) -Destination (Join-Path $release 'files') -Force
     }
     @('dlss5-neural.addon32','dlss5-neural-host64.exe') | ForEach-Object {"$((Get-FileHash -LiteralPath (Join-Path $release "files/$_") -Algorithm SHA256).Hash.ToLowerInvariant())  $_"} | Set-Content -Encoding ASCII -LiteralPath (Join-Path $release 'payload.sha256')
-    $canTest=(Test-Path (Join-Path $release 'files/dxgi.dll')) -and (Test-Path (Join-Path $release 'files/dlssnr_amd_pass1.dll')) -and (Test-Path (Join-Path $release 'files/dlssnr_on_amd_weights.bin'))
-    if($canTest){
-        & $installerTest $release | Tee-Object -FilePath (Join-Path $out 'installer-tests.log')
-        if($LASTEXITCODE -ne 0){throw 'Installer tests failed'}
-    }else{
-        & $installerTest | Tee-Object -FilePath (Join-Path $out 'installer-tests.log')
-        if($LASTEXITCODE -ne 0){throw 'Installer core tests failed'}
-        Write-Host 'Pinned payload fixture not supplied; wrapper/runtime payload tests were skipped.'
-    }
     # Build the current integrated addon64 from the same checkout. Git already records whether
     # this feature changed existing sources; byte hashes tied to an older checkout are brittle
     # across rebases and Windows line-ending conversion.

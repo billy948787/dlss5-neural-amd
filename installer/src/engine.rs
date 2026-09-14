@@ -1480,6 +1480,226 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // --- Parity with installer-x86/tests.cpp -------------------------------------------------
+    // These were the behaviours the C++ fixture asserted and this suite did not, checked one by one
+    // before that fixture was retired rather than trusting that two test counts meant the same
+    // coverage.
+
+    #[test]
+    fn a_fresh_install_writes_the_x86_tuning_defaults() {
+        let ini = fresh_ini();
+        assert_eq!(get_ini(&ini, "dlss5", "ColourStrength"), "0.25");
+        assert_eq!(get_ini(&ini, "dlss5", "Scale"), "1.0");
+        assert_eq!(get_ini(&ini, "dlss5", "Passes"), "1");
+        assert!(ini.contains("\r\n"), "the ini is written with CRLF like the rest of them");
+    }
+
+    fn release_fixture() -> Option<PathBuf> {
+        let raw = std::env::var("DLSS5_TEST_RELEASE_DIR").ok()?;
+        let path = PathBuf::from(raw);
+        path.join("payload.sha256").is_file().then_some(path)
+    }
+
+    fn x86_game(tag: &str) -> PathBuf {
+        let root = temp(tag);
+        let mut pe = vec![0u8; 512];
+        pe[0] = 0x4d;
+        pe[1] = 0x5a;
+        pe[60] = 128;
+        pe[128] = 0x50;
+        pe[129] = 0x45;
+        pe[132] = 0x4c;
+        pe[133] = 0x01;
+        pe[152] = 0x0b;
+        pe[153] = 0x01;
+        write(&root.join("game.exe"), &pe).unwrap();
+        root
+    }
+
+    #[test]
+    fn the_proxy_that_gets_installed_follows_the_api() {
+        let Some(release) = release_fixture() else {
+            eprintln!("skipped: set DLSS5_TEST_RELEASE_DIR");
+            return;
+        };
+        for (preset, wanted, unwanted) in
+            [("D3D11", "dxgi.dll", "d3d9.dll"), ("D3D9", "d3d9.dll", "dxgi.dll")]
+        {
+            let game = x86_game(&format!("parity-proxy-{preset}"));
+            let mut app = Installer::new(release.clone());
+            app.install(&game.join("game.exe"), preset).unwrap();
+
+            assert!(game.join(wanted).is_file(), "{preset} must install {wanted}");
+            assert!(!game.join(unwanted).exists(), "{preset} must not install {unwanted}");
+            // No translation wrapper on a native route, and dgVoodoo is gone for good.
+            assert!(!game.join("d3d8.dll").exists());
+            assert!(!game.join("dgVoodoo.conf").exists());
+            assert_eq!(
+                hash_file(&game.join(wanted)).unwrap(),
+                RESHADE_SHA,
+                "the pinned ReShade build is what lands"
+            );
+            let _ = std::fs::remove_dir_all(&game);
+        }
+    }
+
+    #[test]
+    fn reinstalling_is_idempotent_and_never_rewrites_the_users_tuning() {
+        let Some(release) = release_fixture() else {
+            eprintln!("skipped: set DLSS5_TEST_RELEASE_DIR");
+            return;
+        };
+        let game = x86_game("parity-reinstall");
+        let exe = game.join("game.exe");
+        let mut app = Installer::new(release.clone());
+        app.install(&exe, "D3D11").unwrap();
+
+        let manifest_before = read(&game.join(MANIFEST_NAME)).unwrap();
+        let mut again = Installer::new(release.clone());
+        again.install(&exe, "D3D11").unwrap();
+        assert_eq!(
+            read(&game.join(MANIFEST_NAME)).unwrap(),
+            manifest_before,
+            "a reinstall of the same content must not churn the manifest"
+        );
+
+        // Tuning the person changed afterwards is theirs.
+        let tuned = b"[dlss5]\r\nColourStrength=0.65\r\nScale=0.75\r\n".to_vec();
+        write(&game.join("dlss5-neural.ini"), &tuned).unwrap();
+        let mut third = Installer::new(release.clone());
+        third.install(&exe, "D3D11").unwrap();
+        assert_eq!(
+            read(&game.join("dlss5-neural.ini")).unwrap(),
+            tuned,
+            "reinstall preserves user tuning byte for byte"
+        );
+
+        // And uninstall keeps it, because it is not ours to take.
+        let mut remover = Installer::new(release);
+        remover.uninstall(&game, false).unwrap();
+        assert_eq!(read(&game.join("dlss5-neural.ini")).unwrap(), tuned);
+        let _ = std::fs::remove_dir_all(&game);
+    }
+
+    #[test]
+    fn a_pre_existing_tuning_file_is_never_recreated_or_touched() {
+        let Some(release) = release_fixture() else {
+            eprintln!("skipped: set DLSS5_TEST_RELEASE_DIR");
+            return;
+        };
+        let game = x86_game("parity-tuning");
+        let mine = b"[dlss5]\r\nStartOn=1\r\n".to_vec();
+        write(&game.join("dlss5-neural.ini"), &mine).unwrap();
+
+        let mut app = Installer::new(release);
+        app.install(&game.join("game.exe"), "D3D11").unwrap();
+        assert_eq!(
+            read(&game.join("dlss5-neural.ini")).unwrap(),
+            mine,
+            "an ini that was already there is left exactly as it was"
+        );
+        let _ = std::fs::remove_dir_all(&game);
+    }
+
+    #[test]
+    fn a_file_replaced_after_installing_is_kept_rather_than_removed() {
+        let Some(release) = release_fixture() else {
+            eprintln!("skipped: set DLSS5_TEST_RELEASE_DIR");
+            return;
+        };
+        let game = x86_game("parity-replaced");
+        let mut app = Installer::new(release.clone());
+        app.install(&game.join("game.exe"), "D3D11").unwrap();
+
+        write(&game.join("dxgi.dll"), b"a build of my own").unwrap();
+        let mut remover = Installer::new(release);
+        remover.uninstall(&game, false).unwrap();
+        assert_eq!(
+            read(&game.join("dxgi.dll")).unwrap(),
+            b"a build of my own",
+            "uninstall must not delete something swapped in after the install"
+        );
+        let _ = std::fs::remove_dir_all(&game);
+    }
+
+    #[test]
+    fn a_payload_that_fails_its_hash_is_refused_before_anything_is_written() {
+        let Some(release) = release_fixture() else {
+            eprintln!("skipped: set DLSS5_TEST_RELEASE_DIR");
+            return;
+        };
+        for corrupt in ["dlssnr_amd_pass1.dll", "dlssnr_on_amd_weights.bin", "dxgi.dll"] {
+            let fake = temp(&format!("parity-corrupt-{corrupt}"));
+            std::fs::create_dir_all(fake.join("files")).unwrap();
+            write(
+                &fake.join("payload.sha256"),
+                &read(&release.join("payload.sha256")).unwrap(),
+            )
+            .unwrap();
+            for entry in std::fs::read_dir(release.join("files")).unwrap().flatten() {
+                let name = entry.file_name();
+                let to = fake.join("files").join(&name);
+                if name.to_string_lossy() == corrupt {
+                    write(&to, b"not the real payload").unwrap();
+                } else {
+                    std::fs::copy(entry.path(), &to).unwrap();
+                }
+            }
+
+            let game = x86_game(&format!("parity-corrupt-game-{corrupt}"));
+            let app = Installer::new(fake.clone());
+            let err = app.plan(&game.join("game.exe"), "D3D11").unwrap_err().0;
+            assert!(
+                err.contains("SHA256 mismatch"),
+                "{corrupt} should have been refused by hash, got: {err}"
+            );
+            assert!(
+                !game.join(MANIFEST_NAME).exists(),
+                "a refused payload must not leave a journal"
+            );
+            let _ = std::fs::remove_dir_all(&fake);
+            let _ = std::fs::remove_dir_all(&game);
+        }
+    }
+
+    #[test]
+    fn the_d3d8_route_fails_closed_when_the_pinned_translator_is_absent() {
+        let Some(release) = release_fixture() else {
+            eprintln!("skipped: set DLSS5_TEST_RELEASE_DIR");
+            return;
+        };
+        let without = temp("parity-no-translator");
+        std::fs::create_dir_all(without.join("files")).unwrap();
+        write(
+            &without.join("payload.sha256"),
+            &read(&release.join("payload.sha256")).unwrap(),
+        )
+        .unwrap();
+        for entry in std::fs::read_dir(release.join("files")).unwrap().flatten() {
+            if entry.file_name().to_string_lossy() == "d3d8to9.dll" {
+                continue;
+            }
+            std::fs::copy(entry.path(), without.join("files").join(entry.file_name())).unwrap();
+        }
+
+        let game = x86_game("parity-no-translator-game");
+        let app = Installer::new(without.clone());
+        assert!(
+            app.plan(&game.join("game.exe"), "D3D8").is_err(),
+            "D3D8 must fail closed without its pinned sidecar rather than improvising"
+        );
+        let _ = std::fs::remove_dir_all(&without);
+        let _ = std::fs::remove_dir_all(&game);
+    }
+
+    #[test]
+    fn a_legacy_d3d9_manifest_also_stays_uninstallable() {
+        let legacy = captured_manifest()
+            .replace("\"preset\":\"D3D8\"", "\"preset\":\"D3D9\"")
+            .replace("\"dgVoodoo\":\"none\"", "\"dgVoodoo\":\"2.87.4\"");
+        assert_eq!(decode(&legacy).unwrap().preset, "D3D9");
+    }
+
     #[test]
     fn atomic_manifest_round_trips_through_the_filesystem() {
         let root = temp("atomic");
