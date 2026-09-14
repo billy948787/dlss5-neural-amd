@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::fs;
 use crate::engine;
+pub use crate::engine::Route;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -27,18 +28,51 @@ pub const WEIGHTS_SHA: &str = "6bf8dc931ef3ccffe18c82de26ab374156e7f19539ffcf8ea
 pub const RUNTIME_SHA_0214: &str =
     "e145ff963b1ef614000000000000000000000000000000000000000000000000";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
     Pcsx2,
     Rpcs3,
     Dx11,
     Dx12,
     Vulkan,
+    X86Dx11,
+    X86Dx9,
+    X86Dx8,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 5] =
+    pub const ALL: [Preset; 8] = [
+        Preset::Pcsx2,
+        Preset::Rpcs3,
+        Preset::Dx11,
+        Preset::Dx12,
+        Preset::Vulkan,
+        Preset::X86Dx11,
+        Preset::X86Dx9,
+        Preset::X86Dx8,
+    ];
+
+    const X64: [Preset; 5] =
         [Preset::Pcsx2, Preset::Rpcs3, Preset::Dx11, Preset::Dx12, Preset::Vulkan];
+    const X86: [Preset; 3] = [Preset::X86Dx11, Preset::X86Dx9, Preset::X86Dx8];
+
+    pub fn route(self) -> Route {
+        match self {
+            Preset::X86Dx11 | Preset::X86Dx9 | Preset::X86Dx8 => Route::X86,
+            _ => Route::X64,
+        }
+    }
+
+    /// What the target row offers. Five of the ten API-by-bitness combinations do not exist, and
+    /// the detected width rules out the rest, so a person is never shown a choice that cannot work.
+    /// When nothing could be detected the whole list stays available rather than guessing.
+    pub fn offered(detected: &Detected) -> &'static [Preset] {
+        match detected.route() {
+            Some(Route::X64) => &Self::X64,
+            Some(Route::X86) => &Self::X86,
+            None => &Self::ALL,
+        }
+    }
 
     /// The string recorded in the install manifest. Kept separate from `label`, which is prose
     /// that can be reworded, while this one has to keep matching manifests already on disk.
@@ -49,6 +83,9 @@ impl Preset {
             Preset::Dx11 => "D3D11",
             Preset::Dx12 => "D3D12",
             Preset::Vulkan => "Vulkan",
+            Preset::X86Dx11 => "D3D11",
+            Preset::X86Dx9 => "D3D9",
+            Preset::X86Dx8 => "D3D8",
         }
     }
 
@@ -59,6 +96,9 @@ impl Preset {
             Preset::Dx11 => "D3D11 game",
             Preset::Dx12 => "D3D12 game",
             Preset::Vulkan => "Vulkan game",
+            Preset::X86Dx11 => "D3D11 game, 32-bit",
+            Preset::X86Dx9 => "D3D9 game, 32-bit",
+            Preset::X86Dx8 => "D3D8 game, 32-bit",
         }
     }
 
@@ -73,8 +113,8 @@ impl Preset {
     /// exactly the emulator users -- the files go beside the emulator, not beside the ROM.
     pub fn folder_label(self) -> &'static str {
         match self {
-            Preset::Pcsx2 | Preset::Rpcs3 => " Emulator folder ",
-            Preset::Dx11 | Preset::Dx12 | Preset::Vulkan => " Game folder ",
+            Preset::Pcsx2 | Preset::Rpcs3 => " Emulator folder or executable ",
+            _ => " Game folder or executable ",
         }
     }
 
@@ -85,7 +125,7 @@ impl Preset {
         match self {
             Preset::Pcsx2 => Some("pcsx2-qt.exe"),
             Preset::Rpcs3 => Some("rpcs3.exe"),
-            Preset::Dx11 | Preset::Dx12 | Preset::Vulkan => None,
+            _ => None,
         }
     }
 
@@ -115,6 +155,15 @@ impl Preset {
                  game also has to import vkCreateDevice statically -- one that resolves Vulkan \
                  through vkGetInstanceProcAddr cannot be hooked, and the add-on stands down \
                  rather than guess. No depth on Vulkan either way: colour and estimated motion."
+            }
+            Preset::X86Dx11 => {
+                "EXPERIMENTAL. A 32-bit game cannot load the 64-bit runtime, so the add-on runs                  as a pair: a 32-bit frontend in the game and a 64-bit helper beside it, sharing                  frames on the same adapter. Install ReShade with full add-on support as the                  32-bit dxgi.dll."
+            }
+            Preset::X86Dx9 => {
+                "EXPERIMENTAL. Same 32-bit pair as D3D11, reached through a private D3D9/D3D11                  stage. D3D9Ex shares GPU textures; plain D3D9 falls back to a CPU round trip                  that costs a fixed few milliseconds a frame no matter how low the scale goes.                  Install ReShade as the 32-bit d3d9.dll."
+            }
+            Preset::X86Dx8 => {
+                "EXPERIMENTAL. D3D8 is translated to D3D9 by the pinned d3d8to9 build and then                  takes the D3D9 route; there is no second renderer. A game that already has its                  own d3d8.dll wrapper keeps it, and the translator is installed beside it as                  d3d8R.dll. Install ReShade as the 32-bit d3d9.dll."
             }
         }
     }
@@ -196,6 +245,13 @@ fn sha256(path: &Path) -> std::io::Result<String> {
 
 /// Accepts either the folder holding the two files or one of the files themselves, because both
 /// are things a person reasonably pastes.
+/// The path exactly as typed, file or folder. `resolve_source` deliberately turns a dropped
+/// executable into its folder, which is right for a flow that installs into one and wrong for
+/// anything that has to read the PE header of the executable itself.
+fn resolve_target(raw: &str) -> PathBuf {
+    PathBuf::from(raw.trim().trim_matches('"'))
+}
+
 fn resolve_source(raw: &str) -> PathBuf {
     let p = PathBuf::from(raw.trim().trim_matches('"'));
     if p.is_file() {
@@ -477,7 +533,143 @@ pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     report
 }
 
+/// The 32-bit route reads the PE header to be certain, so it needs the executable and not just the
+/// folder. When a folder was given and exactly one 32-bit executable is in it, that is unambiguous
+/// and gets used; anything else is a question only the person can answer.
+fn x86_target(game_dir: &str, report: &mut Report) -> Option<PathBuf> {
+    let path = resolve_target(game_dir);
+    if path.is_file() {
+        return Some(path);
+    }
+    if !path.is_dir() {
+        report.err(format!("{} is not a folder.", path.display()));
+        return None;
+    }
+    let mut found: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let is_exe = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("exe"))
+                == Some(true);
+            if p.is_file()
+                && is_exe
+                && engine::machine_of_file(&p) == Some(engine::MACHINE_X86)
+            {
+                found.push(p);
+            }
+        }
+    }
+    match found.len() {
+        1 => Some(found.remove(0)),
+        0 => {
+            report.err(
+                "No 32-bit executable in that folder. The bridge route needs the game's own .exe: \
+                 point field 2 straight at it.",
+            );
+            None
+        }
+        _ => {
+            let names: Vec<String> = found
+                .iter()
+                .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                .collect();
+            report.err(format!(
+                "More than one 32-bit executable here ({}). Point field 2 at the one the game \
+                 actually runs, rather than at the folder.",
+                names.join(", ")
+            ));
+            None
+        }
+    }
+}
+
+fn install_x86(game_dir: &str, release_dir: &str, preset: Preset) -> Report {
+    let mut report = Report::new();
+    let Some(target) = x86_target(game_dir, &mut report) else {
+        return report;
+    };
+    let release = resolve_source(release_dir);
+    if release.as_os_str().is_empty() {
+        report.err(
+            "Field 1 has to be the folder you unzipped the x86 release into -- the one holding \
+             files\\ and payload.sha256. The bridge ships as separate files, so nothing can be \
+             installed without it.",
+        );
+        return report;
+    }
+    if !release.join("payload.sha256").is_file() {
+        report.err(format!(
+            "{} does not look like the x86 release: payload.sha256 is not in it.",
+            release.display()
+        ));
+        return report;
+    }
+
+    report.info(format!("target: {}", target.display()));
+    report.info(format!("preset: {}", preset.label()));
+
+    let mut app = engine::Installer::new(release);
+    let outcome = app.install(&target, preset.manifest_preset());
+    for line in &app.log {
+        narrate(line, &mut report);
+    }
+    match outcome {
+        Ok(()) => {
+            report.info(preset.note());
+            report.info(
+                "It starts switched off. Open the overlay with Home, or press Ctrl+End. StartOn=1 \
+                 in dlss5-neural.ini makes it come up enabled.",
+            );
+        }
+        Err(e) => report.err(format!(
+            "{e}. Nothing was left half-written: the install rolled itself back."
+        )),
+    }
+    report
+}
+
+fn uninstall_x86(game_dir: &str) -> Report {
+    let mut report = Report::new();
+    let path = resolve_target(game_dir);
+    if path.as_os_str().is_empty() {
+        report.err("No game folder given.");
+        return report;
+    }
+    // Uninstall works off the manifest, so the folder is enough -- but accept an executable too,
+    // because that is what the same field held during the install.
+    let dir = if path.is_file() {
+        match engine::install_directory(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                report.err(e.0);
+                return report;
+            }
+        }
+    } else {
+        path
+    };
+    report.info(format!("target: {}", dir.display()));
+
+    let mut log = Vec::new();
+    match engine::uninstall(&dir, Route::X86, false, &mut log) {
+        Ok(()) => {
+            for line in &log {
+                narrate(line, &mut report);
+            }
+        }
+        Err(e) => report.err(format!("{e}")),
+    }
+    report.info("ReShade itself was left alone. Use its own installer to remove it.");
+    report
+}
+
 pub fn install(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
+    if preset.route() == Route::X86 {
+        return install_x86(game_dir, runtime_dir, preset);
+    }
     let mut report = Report::new();
     let dir = resolve_source(game_dir);
     let src = resolve_source(runtime_dir);
@@ -527,7 +719,7 @@ pub fn install(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     match engine::apply(
         &dir,
         preset.manifest_preset(),
-        engine::Route::X64,
+        Route::X64,
         &files,
         &mut log,
     ) {
@@ -559,7 +751,10 @@ pub fn install(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     report
 }
 
-pub fn uninstall(game_dir: &str, _preset: Preset) -> Report {
+pub fn uninstall(game_dir: &str, preset: Preset) -> Report {
+    if preset.route() == Route::X86 {
+        return uninstall_x86(game_dir);
+    }
     let mut report = Report::new();
     let dir = resolve_source(game_dir);
     if dir.as_os_str().is_empty() {
@@ -577,10 +772,10 @@ pub fn uninstall(game_dir: &str, _preset: Preset) -> Report {
     // An install written by this version has a manifest, so it knows what it owned, what it
     // displaced and what the user has changed since. Installs from before the manifest existed have
     // none, and the name sweep below is the only way to take those back.
-    let manifest = dir.join(engine::Route::X64.manifest_name());
+    let manifest = dir.join(Route::X64.manifest_name());
     if manifest.is_file() {
         let mut log = Vec::new();
-        match engine::uninstall(&dir, engine::Route::X64, false, &mut log) {
+        match engine::uninstall(&dir, Route::X64, false, &mut log) {
             Ok(()) => {
                 for line in &log {
                     narrate(line, &mut report);
@@ -652,6 +847,136 @@ pub fn uninstall(game_dir: &str, _preset: Preset) -> Report {
 // it: what lands in a folder, what is refused, and what uninstall takes back out. The real
 // weights are 147 MB, so the tests use stand-ins and assert on the paths that do not need the
 // genuine bytes -- a wrong hash, a missing file, the dead-file sweep, the round trip.
+/// What the target says about which route applies.
+///
+/// `docs/installer-merge.md` calls for bitness to be detected rather than asked, and it is -- but
+/// implementing it turned up a case the plan did not: the x64 screen has always taken a *folder*,
+/// and a folder can hold a 32-bit launcher next to a 64-bit game. So this detects when the answer
+/// is unambiguous and says so when it is not, rather than picking one and being confidently wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Detected {
+    /// Every executable found agrees.
+    Route(engine::Route, String),
+    /// Executables of both widths are present; the person has to say which one they run.
+    Mixed(String),
+    /// Nothing to read: an empty field, a folder with no executables, or a path that is not there.
+    Unknown,
+}
+
+impl Detected {
+    pub fn route(&self) -> Option<engine::Route> {
+        match self {
+            Detected::Route(r, _) => Some(*r),
+            _ => None,
+        }
+    }
+
+    /// The line the screen shows under the target field.
+    pub fn line(&self) -> Option<&str> {
+        match self {
+            Detected::Route(_, why) | Detected::Mixed(why) => Some(why),
+            Detected::Unknown => None,
+        }
+    }
+}
+
+fn route_of(machine: u16) -> Option<engine::Route> {
+    match machine {
+        engine::MACHINE_X86 => Some(Route::X86),
+        engine::MACHINE_X64 => Some(Route::X64),
+        _ => None,
+    }
+}
+
+/// Read the target -- an executable, or the executables sitting in a folder -- and decide.
+pub fn detect(target: &str) -> Detected {
+    let path = resolve_target(target);
+    if path.as_os_str().is_empty() {
+        return Detected::Unknown;
+    }
+
+    if path.is_file() {
+        return match engine::machine_of_file(&path).and_then(route_of) {
+            Some(Route::X86) => Detected::Route(
+                Route::X86,
+                format!(
+                    "{} is a 32-bit executable, so this is the bridge route.",
+                    name_of(&path)
+                ),
+            ),
+            Some(Route::X64) => Detected::Route(
+                Route::X64,
+                format!("{} is a 64-bit executable.", name_of(&path)),
+            ),
+            None => Detected::Unknown,
+        };
+    }
+    if !path.is_dir() {
+        return Detected::Unknown;
+    }
+
+    let mut x86: Vec<String> = Vec::new();
+    let mut x64: Vec<String> = Vec::new();
+    let Ok(entries) = fs::read_dir(&path) else {
+        return Detected::Unknown;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        if p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("exe")) != Some(true)
+        {
+            continue;
+        }
+        match engine::machine_of_file(&p).and_then(route_of) {
+            Some(Route::X86) => x86.push(name_of(&p)),
+            Some(Route::X64) => x64.push(name_of(&p)),
+            None => {}
+        }
+    }
+
+    match (x86.is_empty(), x64.is_empty()) {
+        (true, true) => Detected::Unknown,
+        (false, true) => Detected::Route(
+            Route::X86,
+            format!(
+                "{} here {} 32-bit, so this is the bridge route.",
+                joined(&x86),
+                if x86.len() == 1 { "is" } else { "are" }
+            ),
+        ),
+        (true, false) => Detected::Route(
+            Route::X64,
+            format!(
+                "{} here {} 64-bit.",
+                joined(&x64),
+                if x64.len() == 1 { "is" } else { "are" }
+            ),
+        ),
+        (false, false) => Detected::Mixed(format!(
+            "Both widths are here: {} is 32-bit and {} is 64-bit. A 32-bit launcher beside a \
+             64-bit game is normal -- pick the one the game actually runs as.",
+            joined(&x86),
+            joined(&x64)
+        )),
+    }
+}
+
+fn name_of(p: &Path) -> String {
+    p.file_name().unwrap_or_default().to_string_lossy().to_string()
+}
+
+/// Three names at most: the point is to show the evidence, not to list a folder.
+fn joined(names: &[String]) -> String {
+    let shown: Vec<&str> = names.iter().take(3).map(|s| s.as_str()).collect();
+    if names.len() > shown.len() {
+        format!("{} and {} more", shown.join(", "), names.len() - shown.len())
+    } else {
+        shown.join(", ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,16 +1048,128 @@ mod tests {
         }
     }
 
+    fn pe_bytes(x64: bool) -> Vec<u8> {
+        let mut b = vec![0u8; 512];
+        b[0] = 0x4d;
+        b[1] = 0x5a;
+        b[60] = 128;
+        b[128] = 0x50;
+        b[129] = 0x45;
+        let machine: u16 = if x64 { 0x8664 } else { 0x14c };
+        b[132] = (machine & 0xff) as u8;
+        b[133] = (machine >> 8) as u8;
+        let magic: u16 = if x64 { 0x20b } else { 0x10b };
+        b[152] = (magic & 0xff) as u8;
+        b[153] = (magic >> 8) as u8;
+        b
+    }
+
+    #[test]
+    fn an_executable_names_its_own_width() {
+        let dir = temp("detect-exe");
+        let x86 = dir.join("old-game.exe");
+        let x64 = dir.join("new-game.exe");
+        fs::write(&x86, pe_bytes(false)).unwrap();
+        fs::write(&x64, pe_bytes(true)).unwrap();
+
+        let d = detect(x86.to_str().unwrap());
+        assert_eq!(d.route(), Some(Route::X86));
+        assert!(d.line().unwrap().contains("old-game.exe"), "the evidence is named");
+
+        assert_eq!(detect(x64.to_str().unwrap()).route(), Some(Route::X64));
+        assert_eq!(detect("").route(), None);
+    }
+
+    #[test]
+    fn a_folder_is_read_through_the_executables_in_it() {
+        let dir = temp("detect-folder");
+        fs::write(dir.join("game.exe"), pe_bytes(true)).unwrap();
+        fs::write(dir.join("readme.txt"), b"not an executable").unwrap();
+        assert_eq!(detect(dir.to_str().unwrap()).route(), Some(Route::X64));
+
+        // A 32-bit launcher beside a 64-bit game is ordinary, and guessing between them would be
+        // worse than saying so.
+        fs::write(dir.join("launcher.exe"), pe_bytes(false)).unwrap();
+        let mixed = detect(dir.to_str().unwrap());
+        assert_eq!(mixed.route(), None);
+        assert!(matches!(mixed, Detected::Mixed(_)));
+        assert!(mixed.line().unwrap().contains("launcher.exe"));
+    }
+
+    #[test]
+    fn a_folder_with_nothing_to_read_stays_unknown() {
+        let dir = temp("detect-empty");
+        assert_eq!(detect(dir.to_str().unwrap()), Detected::Unknown);
+        fs::write(dir.join("notes.txt"), b"x").unwrap();
+        assert_eq!(detect(dir.to_str().unwrap()), Detected::Unknown);
+    }
+
+    #[test]
+    fn the_offered_presets_follow_the_detected_width() {
+        let all = Preset::offered(&Detected::Unknown);
+        assert_eq!(all.len(), Preset::ALL.len(), "nothing known yet offers everything");
+
+        let x64 = Preset::offered(&Detected::Route(Route::X64, String::new()));
+        assert!(x64.contains(&Preset::Pcsx2) && x64.contains(&Preset::Vulkan));
+        assert!(
+            !x64.iter().any(|p| p.route() == Route::X86),
+            "a 64-bit target must not be offered the bridge presets"
+        );
+
+        let x86 = Preset::offered(&Detected::Route(Route::X86, String::new()));
+        assert_eq!(x86, &[Preset::X86Dx11, Preset::X86Dx9, Preset::X86Dx8]);
+        assert!(
+            !x86.iter().any(|p| p.route() == Route::X64),
+            "D3D12 and Vulkan have no 32-bit route at all"
+        );
+    }
+
+    #[test]
+    fn the_bridge_route_wants_the_executable_and_says_why() {
+        let game = temp("x86-folder");
+        fs::write(game.join("a.exe"), pe_bytes(false)).unwrap();
+        fs::write(game.join("b.exe"), pe_bytes(false)).unwrap();
+        let report = install(game.to_str().unwrap(), "", Preset::X86Dx9);
+        assert!(report.failed);
+        assert!(
+            has_err(&report, "More than one 32-bit executable"),
+            "{}",
+            report.to_log("ambiguous")
+        );
+
+        // One candidate is unambiguous, so the folder is enough and the release folder is what is
+        // missing next.
+        fs::remove_file(game.join("b.exe")).unwrap();
+        let report = install(game.to_str().unwrap(), "", Preset::X86Dx9);
+        assert!(report.failed);
+        assert!(has_err(&report, "payload.sha256") || has_err(&report, "unzipped the x86 release"),
+            "{}", report.to_log("no release"));
+    }
+
+    #[test]
+    fn a_64_bit_target_is_refused_by_the_bridge_route_before_anything_is_written() {
+        let game = temp("x86-wrong-width");
+        let exe = game.join("game64.exe");
+        fs::write(&exe, pe_bytes(true)).unwrap();
+        let release = temp("x86-wrong-width-release");
+        fs::write(release.join("payload.sha256"), b"").unwrap();
+
+        let report = install(exe.to_str().unwrap(), release.to_str().unwrap(), Preset::X86Dx11);
+        assert!(report.failed);
+        assert!(has_err(&report, "PE32/x86"), "{}", report.to_log("width"));
+        assert!(!game.join(engine::MANIFEST_NAME).exists());
+    }
+
     #[test]
     fn an_install_now_records_a_manifest_the_engine_can_read_back() {
         let game = temp("x64-manifest");
         let report = install(game.to_str().unwrap(), "", Preset::Dx12);
         assert!(!report.failed);
 
-        let manifest = game.join(engine::Route::X64.manifest_name());
+        let manifest = game.join(Route::X64.manifest_name());
         assert!(manifest.is_file(), "the x64 route must now journal what it did");
         assert_ne!(
-            engine::Route::X64.manifest_name(),
+            Route::X64.manifest_name(),
             engine::MANIFEST_NAME,
             "an x64 install must not drop the x86 bridge's filename into the folder"
         );
@@ -740,7 +1177,7 @@ mod tests {
         let text = String::from_utf8(fs::read(&manifest).unwrap()).unwrap();
         let m = engine::decode(&text).expect("the manifest we just wrote must decode");
         assert_eq!(m.preset, "D3D12");
-        assert_eq!(m.route, engine::Route::X64);
+        assert_eq!(m.route, Route::X64);
         assert!(m.entries.iter().any(|e| e.name == ADDON_NAME && e.owned));
     }
 
@@ -804,7 +1241,7 @@ mod tests {
             "{}",
             report.to_log("locked")
         );
-        assert!(!game.join(engine::Route::X64.manifest_name()).exists());
+        assert!(!game.join(Route::X64.manifest_name()).exists());
 
         let mut perms = fs::metadata(&held).unwrap().permissions();
         #[allow(clippy::permissions_set_readonly_false)]
@@ -822,7 +1259,7 @@ mod tests {
         fs::write(game.join(WEIGHTS_NAME), b"old weights").unwrap();
         fs::write(game.join("dlss5-neural.ini"), b"[dlss5]\nScale=0.5\n").unwrap();
         fs::create_dir_all(game.join("dlss5-runtime")).unwrap();
-        assert!(!game.join(engine::Route::X64.manifest_name()).exists());
+        assert!(!game.join(Route::X64.manifest_name()).exists());
 
         let report = uninstall(game.to_str().unwrap(), Preset::Dx11);
         assert!(!report.failed, "{}", report.to_log("legacy"));
@@ -845,7 +1282,7 @@ mod tests {
         // The add-on used to be written before the payloads were checked, so a refusal left it
         // behind on its own. Routing through the engine made the whole thing one transaction.
         assert!(!game.join(ADDON_NAME).exists(), "nothing may be written when a payload is refused");
-        assert!(!game.join(engine::Route::X64.manifest_name()).exists());
+        assert!(!game.join(Route::X64.manifest_name()).exists());
     }
 
     #[test]
@@ -858,8 +1295,8 @@ mod tests {
         files.insert("dlss5-neural.addon32".into(), b"x86 add-on".to_vec());
         let mut log = Vec::new();
         // Different manifest file, so it is a separate install rather than a silent merge.
-        assert!(engine::apply(&game, "D3D11", engine::Route::X86, &files, &mut log).is_ok());
-        assert!(game.join(engine::Route::X64.manifest_name()).is_file());
+        assert!(engine::apply(&game, "D3D11", Route::X86, &files, &mut log).is_ok());
+        assert!(game.join(Route::X64.manifest_name()).is_file());
         assert!(game.join(engine::MANIFEST_NAME).is_file());
     }
 

@@ -136,6 +136,17 @@ pub fn machine(b: &[u8]) -> Result<u16> {
     Ok(m)
 }
 
+/// Read only enough of a file to answer the machine question. Scanning a game folder means opening
+/// every executable in it, and the header sits in the first few hundred bytes.
+pub fn machine_of_file(path: &Path) -> Option<u16> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = vec![0u8; 64 * 1024];
+    let read = f.read(&mut head).ok()?;
+    head.truncate(read);
+    machine(&head).ok()
+}
+
 /// Some maintained game wrappers deliberately forward Direct3D 8 to `d3d8R.dll`. Detect only an
 /// explicit embedded sidecar name; otherwise fail closed rather than replacing an unknown wrapper.
 pub fn advertises_d3d8_sidecar(b: &[u8]) -> bool {
@@ -413,7 +424,15 @@ fn normalise(p: &Path) -> PathBuf {
 /// resolves inside the selected game directory -- Half-Life 2 loads its proxy from `bin`, and a
 /// BasePath pointing anywhere else is an escape, not a layout.
 pub fn install_directory(target: &Path) -> Result<PathBuf> {
-    let root = weakly_canonical(absolute(target).parent().unwrap_or(Path::new(".")));
+    // Either end of the pointer works: an executable, whose folder is the root, or the folder
+    // itself. The x86 side has always named an executable because it needs the PE header; the x64
+    // side has always named a folder. Accepting both is what lets one screen serve both.
+    let absolute_target = absolute(target);
+    let root = if absolute_target.is_dir() {
+        weakly_canonical(&absolute_target)
+    } else {
+        weakly_canonical(absolute_target.parent().unwrap_or(Path::new(".")))
+    };
     safe_path(&root)?;
     let redirect = root.join("ReShade.ini");
     safe_path(&redirect)?;

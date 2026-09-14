@@ -111,7 +111,7 @@ The union is the requirement. A merge that drops either side's safety is not don
 
 ## Sequence
 
-**Steps 1, 2 and 3 are done.** What they turned up, recorded so the rest of the sequence accounts for
+**Steps 1 to 4 are done.** What they turned up, recorded so the rest of the sequence accounts for
 it:
 
 - The engine had to be split. `plan()` is route-specific and `apply()` is not, because the x64 route
@@ -135,6 +135,20 @@ it:
   block an install.
 - The guard counts the backup as well as the replacement when checking free space. The old panel
   check predated backups existing, so it under-counted.
+- "Bitness is detected, never asked" needed a caveat. This document assumed the x86 model, where the
+  target is an executable; the x64 screen has always taken a folder, and a folder can hold a 32-bit
+  launcher beside a 64-bit game. Detection now reads an executable directly or scans the
+  executables in a folder, reports the evidence, and says "both widths are here" instead of
+  guessing. The preset row only narrows once the answer is unambiguous.
+- `resolve_source` already turned a dropped executable into its folder, which is right for
+  installing into one and wrong for reading a PE header. Anything that needs the header uses
+  `resolve_target`, which keeps the path as typed.
+- The 32-bit route still needs the executable, not the folder, because it verifies the header before
+  it plans. A folder holding exactly one 32-bit executable is unambiguous and is accepted; more than
+  one is a question.
+- Field 1 means the release folder on the x86 route and the runtime folder on the x64 one. That is
+  the seam decision 1 closes, and it is the last thing left before the two routes look like one
+  tool.
 
 1. Port `core.h` into Rust as the single install engine — manifest, backups, journal, ownership,
    safe path handling, PE check, BasePath. Port `tests.cpp` alongside it; keep the existing Rust

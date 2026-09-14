@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::work::{Level, Preset};
+use crate::work::Level;
 use crate::{App, Focus};
 
 // --- AMD palette ------------------------------------------------------------------------------
@@ -155,7 +155,7 @@ fn target_pane(f: &mut Frame, area: Rect, app: &App) {
     // The selection is marked three ways, so it survives any one of them failing: brackets in the
     // text itself, a filled background, and bold.
     let mut spans = vec![Span::raw(" ")];
-    for (i, p) in Preset::ALL.iter().enumerate() {
+    for (i, p) in app.presets().iter().enumerate() {
         if i == app.preset {
             spans.push(Span::styled(
                 format!("[{}]", p.label()),
@@ -201,7 +201,12 @@ fn field_pane(f: &mut Frame, area: Rect, title: &str, value: &str, focused: bool
 
 fn notes_pane(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
-        Paragraph::new(app.preset().note())
+        Paragraph::new(match app.detected.line() {
+            Some(why) => format!("{why}
+
+{}", app.preset().note()),
+            None => app.preset().note().to_string(),
+        })
             .style(Style::default().fg(WARN))
             .wrap(Wrap { trim: true })
             .block(pane(" Notes ", false)),
