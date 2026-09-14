@@ -1,6 +1,6 @@
 # x86bridge overlay, protocol v2
 
-Generic native D3D9/D3D11 x86 frontend to the original x64 neural engine. This source update adds the ReShade panel **DLSS Neural Rendering (AMD)** while keeping the 32-bit transport isolated from the existing x64 rendering routes.
+Generic native D3D9/D3D11 x86 frontend to the original x64 neural engine, with an experimental D3D8 route through the official d3d8to9 translator. This source update adds the ReShade panel **DLSS Neural Rendering (AMD)** while keeping the 32-bit transport isolated from the existing x64 rendering routes.
 
 ## Build and install
 
@@ -85,9 +85,9 @@ The D3D11 frame order remains capture -> D3D11 FlushAndWait -> FRAME -> original
 4. Test transport-only with existing `DLSS5_X86BRIDGE_TRANSPORT_ONLY=1`; panel must show transport mode and engine controls disabled, result=4. Test resize and helper termination as before.
 5. Send `dlss5-neural-x86.log`, `dlss5-neural-x86-host.log`, build/import/protocol logs from build-x86bridge, and any UI screenshot/error.
 
-Native builds cover D3D9 and D3D11 x86. Live D3D9 interop, fullscreen transitions, MSAA behavior, classic-D3D9 staging performance and GPU/UI behavior still require manual game validation. D3D8 is currently unsupported.
+Native builds cover D3D9 and D3D11 x86. D3D8 is experimental and follows `game D3D8 -> d3d8to9 -> ReShade D3D9 -> native D3D9 frontend`; the neural bridge itself does not implement a second D3D8 renderer. Live D3D8/D3D9 interop, fullscreen transitions, MSAA behavior, classic-D3D9 staging performance and GPU/UI behavior still require manual game validation.
 
 
 ## Incremental update: Factory Defaults and additive installer
 
-See [x86bridge-install.md](x86bridge-install.md). Factory Defaults restores captured upstream tuning in memory with x86 overrides while preserving operational preferences. The separate installer-x86 directory provides native D3D11/D3D9 presets and private/public sidecar layouts without dgVoodoo. Native builds are covered by CI; live game and GPU validation remains manual.
+See [x86bridge-install.md](x86bridge-install.md). Factory Defaults restores captured upstream tuning in memory with x86 overrides while preserving operational preferences. The separate installer-x86 directory provides native D3D11/D3D9 presets, an experimental d3d8to9 preset and private/public sidecar layouts without dgVoodoo. Native builds are covered by CI; live game and GPU validation remains manual.

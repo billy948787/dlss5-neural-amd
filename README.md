@@ -43,8 +43,9 @@ frame back. D3D9 crosses a private D3D9/D3D11 interop stage before using the sam
 D3D9Ex uses shared GPU textures, while classic D3D9 uses a bounded CPU-compatible staging fallback.
 
 This route is still under development and is not part of a stable release. D3D9 and D3D11 are
-native frontends and do not require dgVoodoo. D3D8 is currently unsupported. Build, protocol and
-IPC tests run in CI, while live game/GPU validation remains required. See
+native frontends and do not require dgVoodoo. Experimental D3D8 support uses the official,
+hash-pinned d3d8to9 compatibility layer to reach the native D3D9 frontend. Build, protocol and IPC
+tests run in CI, while live game/GPU validation remains required. See
 [the x86 bridge design](docs/x86bridge.md) and [installation notes](docs/x86bridge-install.md).
 
 Every tool for DLSS 5 (renodx-dlss, DLSS5-Feeder, DLSS5-Swapper) calls NVIDIA's

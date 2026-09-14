@@ -9,4 +9,4 @@ with tempfile.TemporaryDirectory(prefix='installer-native-test-') as d:
  out=Path(d)/'installer-tests'
  subprocess.run([compiler,'-std=c++20','-O2','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',str(r/'installer-x86/tests.cpp'),'-lcrypto','-o',str(out)],check=True)
  subprocess.run([str(out),str(Path(sys.argv[1]).resolve())],check=True)
-print('UNVALIDATED: Windows .NET ZIP extraction, live ReShade docking and game/GPU regression.')
+print('UNVALIDATED: live ReShade docking, D3D8 translation and game/GPU regression.')

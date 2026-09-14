@@ -28,7 +28,8 @@
 - Return HRESULTs from the x86 D3D9 staging operations. A transient `D3DERR_DEVICELOST` or
   `D3DERR_DEVICENOTRESET` is treated as an interrupted reset frame that keeps the host connected
   and resets history on recovery, instead of permanently faulting the bridge.
-- D3D8 is temporarily unavailable until it has a native or otherwise safe maintained route.
+- Add an experimental D3D8 preset through the official, hash-pinned d3d8to9 compatibility layer.
+  It translates D3D8 to the native D3D9 frontend and does not restore the old dgVoodoo route.
 
 ## v0.4.1 — Native Vulkan game stability
 

@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <chrono>
 #include <cstdint>
+#include <cctype>
 #include <iomanip>
 #ifdef _WIN32
 #include <windows.h>
@@ -21,10 +22,13 @@
 namespace install86 {
 namespace fs=std::filesystem;
 using Bytes=std::vector<unsigned char>;
-inline constexpr const char* Notice="Install the official ReShade version with Full Add-on Support for the game's real API. Native D3D9 and D3D11 are supported; D3D8 is not currently supported.";
+inline constexpr const char* Notice="Install official ReShade Full Add-on Support for the translated API. D3D8 uses the pinned d3d8to9 compatibility layer and the native D3D9 frontend.";
 inline constexpr const char* RuntimeSha="ddd82d313aa74c2e7602d17dfb7e7cd90cca9bfc0306f581684d35d75d1b350b";
 inline constexpr const char* WeightsSha="6bf8dc931ef3ccffe18c82de26ab374156e7f19539ffcf8eabaa25dca5cf15ab";
 inline constexpr const char* ReShadeSha="da430e0a9c6eecefa0d1b27d05e16c426fb5d04e808b194d914eaac4b31bc0f8";
+inline constexpr const char* D3D8To9Version="v1.15.1";
+inline constexpr const char* D3D8To9Commit="65870f2302e9c496cd6d873d6095961d5c777668";
+inline constexpr const char* D3D8To9Sha="ab6bf7a9a9f4b3e66a75ca038d8d10289c88acbfe8d52c3b5a8a9a259cb26cd5";
 inline constexpr const char* ManifestName="dlss5-x86bridge.install.json";
 inline void require(bool b,const std::string& why){if(!b)throw std::runtime_error(why);}
 inline std::string lower(std::string s){for(auto& c:s)c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));return s;}
@@ -53,6 +57,15 @@ inline void hashIs(const Bytes& b,const std::string& expected,const std::string&
 inline uint16_t u16(const Bytes& b,size_t p){require(p+2<=b.size(),"Truncated PE");return uint16_t(b[p]|(b[p+1]<<8));}
 inline uint32_t u32(const Bytes& b,size_t p){return uint32_t(u16(b,p))|(uint32_t(u16(b,p+2))<<16);}
 inline uint16_t machine(const Bytes& b){require(b.size()>=64&&u16(b,0)==0x5a4d,"Not a PE executable");auto p=u32(b,60);require(p<=b.size()&&b.size()-p>=26&&u32(b,p)==0x4550,"Invalid PE header");auto m=u16(b,p+4);require((m==0x14c&&u16(b,p+24)==0x10b)||(m==0x8664&&u16(b,p+24)==0x20b),"Unsupported PE format");return m;}
+// Some maintained game wrappers deliberately forward Direct3D 8 to d3d8R.dll. Detect only an
+// explicit embedded sidecar name; otherwise fail closed rather than replacing an unknown wrapper.
+inline bool advertisesD3D8Sidecar(const Bytes& b){
+    constexpr const char* marker="d3d8r.dll";constexpr size_t n=9;
+    for(size_t i=0;i+n<=b.size();++i){bool ascii=true,utf16=i+n*2<=b.size();for(size_t j=0;j<n;++j){
+        ascii=ascii&&std::tolower(static_cast<unsigned char>(b[i+j]))==marker[j];
+        utf16=utf16&&std::tolower(static_cast<unsigned char>(b[i+j*2]))==marker[j]&&b[i+j*2+1]==0;
+    }if(ascii||utf16)return true;}return false;
+}
 // Preserve all unedited INI bytes, including comments and unrelated preferences.
 inline std::string getIni(const std::string& s,const std::string& section,const std::string& key){std::istringstream in(s);std::string line,sec;while(std::getline(in,line)){auto t=trim(line);if(t.size()>1&&t[0]=='['&&t.back()==']')sec=lower(t.substr(1,t.size()-2));else if(sec==lower(section)){auto eq=t.find('=');if(eq!=t.npos&&lower(trim(t.substr(0,eq)))==lower(key))return t.substr(eq+1);}}return "";}
 inline std::string setIni(std::string s,const std::string& section,const std::string& key,const std::string& value){
@@ -91,7 +104,7 @@ inline std::string firstDock(std::string ini,unsigned width,unsigned height){
     if(!windows.empty())windows+=",";
     windows+=panel+",Collapsed=0,DockId="+dock;return setIni(ini,"OVERLAY","Window",windows);
 }
-inline const std::set<std::string>& allowed(){static const std::set<std::string> a={"dxgi.dll","d3d8.dll","d3d9.dll","dgVoodoo.conf","ReShade.ini","dlss5-neural.ini","dlss5-neural.addon32","dlss5-neural-host64.exe","dlssnr_amd_pass1.dll","dlssnr_on_amd_weights.bin"};return a;}
+inline const std::set<std::string>& allowed(){static const std::set<std::string> a={"dxgi.dll","d3d8.dll","d3d8R.dll","d3d9.dll","dgVoodoo.conf","ReShade.ini","dlss5-neural.ini","dlss5-neural.addon32","dlss5-neural-host64.exe","dlssnr_amd_pass1.dll","dlssnr_on_amd_weights.bin"};return a;}
 inline bool config(const std::string& n){return n=="ReShade.ini"||n=="dgVoodoo.conf"||n=="dlss5-neural.ini";}
 inline void safePath(const fs::path& p){
     fs::path walk;for(const auto& part:fs::absolute(p)){walk/=part;
@@ -115,7 +128,7 @@ inline fs::path installDirectory(const fs::path& target){
 }
 struct Entry{std::string name,hash,backup,backupHash;bool owned=false,configuration=false;};
 struct Manifest{std::string preset,state="installed";std::vector<Entry> entries;};
-inline std::string encode(const Manifest& m){std::ostringstream o;o<<"{\n\"schema\":1,\n\"preset\":\""<<m.preset<<"\",\n\"state\":\""<<m.state<<"\",\n\"bridge_protocol\":2,\n\"dgVoodoo\":\""<<(m.preset=="D3D8"?"2.87.4":"none")<<"\",\n\"ReShade\":\"6.8.0.2156 Full Add-on Support\",\n\"files\":[\n";for(size_t i=0;i<m.entries.size();++i){auto& e=m.entries[i];o<<"{\"name\":\""<<e.name<<"\",\"sha256\":\""<<e.hash<<"\",\"backup\":\""<<e.backup<<"\",\"backup_sha256\":\""<<e.backupHash<<"\",\"owned\":"<<(e.owned?"true":"false")<<",\"configuration\":"<<(e.configuration?"true":"false")<<"}"<<(i+1==m.entries.size()?"":",")<<"\n";}return o.str()+"]\n}\n";}
+inline std::string encode(const Manifest& m){std::ostringstream o;o<<"{\n\"schema\":1,\n\"preset\":\""<<m.preset<<"\",\n\"state\":\""<<m.state<<"\",\n\"bridge_protocol\":2,\n\"dgVoodoo\":\"none\",\n\"ReShade\":\"6.8.0.2156 Full Add-on Support\",\n\"files\":[\n";for(size_t i=0;i<m.entries.size();++i){auto& e=m.entries[i];o<<"{\"name\":\""<<e.name<<"\",\"sha256\":\""<<e.hash<<"\",\"backup\":\""<<e.backup<<"\",\"backup_sha256\":\""<<e.backupHash<<"\",\"owned\":"<<(e.owned?"true":"false")<<",\"configuration\":"<<(e.configuration?"true":"false")<<"}"<<(i+1==m.entries.size()?"":",")<<"\n";}return o.str()+"]\n}\n";}
 inline Manifest decode(const std::string& s){
     Manifest m;std::smatch v;require(std::regex_search(s,v,std::regex("\"schema\":1,")),"Unknown manifest schema");
     require(std::regex_search(s,v,std::regex("\"preset\":\"(D3D11|D3D9|D3D8)\"")),"Bad manifest preset");m.preset=v[1];
@@ -131,7 +144,9 @@ inline Manifest decode(const std::string& s){
     }
     size_t rows=0,pos=0;while((pos=s.find("\"name\":",pos))!=s.npos){++rows;pos+=7;}require(rows==m.entries.size()&&rows<=allowed().size(),"Malformed manifest entries");
     auto canonical=encode(m);bool supported=canonical==s;
-    if(!supported&&m.preset=="D3D9"){
+    // The original fork used dgVoodoo for both translated presets. Preserve its manifests for
+    // uninstall/recovery, but never create another one or carry that wrapper into a new install.
+    if(!supported&&(m.preset=="D3D8"||m.preset=="D3D9")){
         const std::string current="\"dgVoodoo\":\"none\"",legacy="\"dgVoodoo\":\"2.87.4\"";
         const auto at=canonical.find(current);if(at!=canonical.npos)canonical.replace(at,current.size(),legacy);
         supported=canonical==s;
@@ -150,7 +165,7 @@ struct Installer{
     void note(const std::string& s){log.push_back(s);}
     Bytes payload(const std::string& name,const std::string& expected){auto b=read(release/"files"/name);hashIs(b,expected,name);return b;}
     std::map<std::string,Bytes> plan(const fs::path& target,const std::string& preset){
-        require(preset=="D3D11"||preset=="D3D9","Unsupported x86 preset");
+        require(preset=="D3D11"||preset=="D3D9"||preset=="D3D8","Unsupported x86 preset");
         safePath(target);require(machine(read(target))==0x14c,"Target must be PE32/x86; x64 targets are not supported");auto dir=installDirectory(target);
         std::map<std::string,Bytes> p;
         auto sums=str(read(release/"payload.sha256"));
@@ -160,7 +175,16 @@ struct Installer{
         }
         p["dlssnr_amd_pass1.dll"]=payload("dlssnr_amd_pass1.dll",RuntimeSha);
         p["dlssnr_on_amd_weights.bin"]=payload("dlssnr_on_amd_weights.bin",WeightsSha);
-        const std::string reshadeName=preset=="D3D9"?"d3d9.dll":"dxgi.dll";
+        if(preset=="D3D8"){
+            auto translator=payload("d3d8to9.dll",D3D8To9Sha);require(machine(translator)==0x14c,"d3d8to9 must be x86");
+            std::string translatorName="d3d8.dll";auto existing=dir/translatorName;safePath(existing);
+            if(fs::exists(existing)&&hashFile(existing)!=D3D8To9Sha){
+                require(advertisesD3D8Sidecar(read(existing)),"Existing d3d8.dll does not advertise d3d8R.dll chaining; preserved");
+                translatorName="d3d8R.dll";
+            }
+            p[translatorName]=std::move(translator);
+        }
+        const std::string reshadeName=preset=="D3D11"?"dxgi.dll":"d3d9.dll";
         if(fs::exists(release/"files/dxgi.dll"))p[reshadeName]=payload("dxgi.dll",ReShadeSha);
         else {require(fs::exists(dir/reshadeName),"Install official ReShade 6.8 Full Add-on Support for the selected API first, or provide private files/dxgi.dll");auto b=read(dir/reshadeName);hashIs(b,ReShadeSha,"Existing ReShade (requires tested 6.8.0.2156 x86 full-addon binary)");p[reshadeName]=std::move(b);}
         require(machine(p[reshadeName])==0x14c,"ReShade must be x86");
@@ -199,7 +223,7 @@ struct Installer{
         m.state="installing";atomicManifest(dir,m);
         try{for(auto& c:changes)write(dir/c.name,c.after);m.state="installed";atomicManifest(dir,m);}
         catch(...){for(auto i=changes.rbegin();i!=changes.rend();++i){if(i->existed)write(dir/i->name,i->before);else fs::remove(dir/i->name);}if(hadManifest)write(dir/ManifestName,oldManifest);else fs::remove(dir/ManifestName);throw;}
-        note("Installed "+preset+" x86; native frontend; same-frame protocol v2");
+        note("Installed "+preset+" x86; "+(preset=="D3D8"?std::string("d3d8to9 ")+D3D8To9Version+" -> native D3D9 frontend":"native frontend")+"; same-frame protocol v2");
     }
     void uninstall(const fs::path& directory,bool removeConfigs=false){
         auto dir=fs::absolute(directory);safePath(dir);safePath(dir/ManifestName);require(fs::exists(dir/ManifestName),"No x86 install manifest");auto m=decode(str(read(dir/ManifestName)));std::vector<Entry> keep;
