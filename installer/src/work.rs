@@ -4,8 +4,6 @@
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::fs;
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt as _;
 use crate::engine;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -345,39 +343,6 @@ fn sweep_dead(dir: &Path, report: &mut Report) {
 // call -- so the screen can answer "will this work?" while the path is still being pasted,
 // instead of after 147 MB have been copied into a folder that was read-only.
 
-/// Can this folder be written to at all? Program Files without elevation is the usual answer.
-fn folder_is_writable(dir: &Path) -> bool {
-    let probe = dir.join(".dlss5-installer-write-probe");
-    match fs::write(&probe, b"") {
-        Ok(()) => {
-            let _ = fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-/// A file that exists but cannot be opened for writing is held by something -- on Windows that is
-/// nearly always the game still running, which is the single most common way an install fails.
-fn is_locked(path: &Path) -> bool {
-    path.is_file() && fs::OpenOptions::new().write(true).open(path).is_err()
-}
-
-#[cfg(windows)]
-fn free_bytes(dir: &Path) -> Option<u64> {
-    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-    let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
-    wide.push(0);
-    let mut free = 0u64;
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut())
-    };
-    (ok != 0).then_some(free)
-}
-#[cfg(not(windows))]
-fn free_bytes(_dir: &Path) -> Option<u64> {
-    None
-}
 
 /// ReShade writes `DisabledAddons=` into its own ini the first time anyone unticks an add-on, and
 /// from then on it never loads it again and says nothing anywhere. It is the one failure in this
@@ -401,11 +366,6 @@ fn check_disabled_addons(dir: &Path, report: &mut Report) {
     }
 }
 
-/// Same file, same bytes? Only the length is compared -- see `RUNTIME_SIZE`.
-fn size_of(path: &Path) -> Option<u64> {
-    fs::metadata(path).ok().map(|m| m.len())
-}
-
 /// What is known before F5, from whatever is filled in so far. Never writes anything except one
 /// zero-byte probe it removes again.
 pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
@@ -421,7 +381,7 @@ pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     } else {
         let mut all_there = true;
         for (name, want) in [(RUNTIME_NAME, RUNTIME_SIZE), (WEIGHTS_NAME, WEIGHTS_SIZE)] {
-            match size_of(&src.join(name)) {
+            match engine::size_of(&src.join(name)) {
                 None => {
                     report.err(format!("{name} is not in that folder."));
                     all_there = false;
@@ -455,7 +415,7 @@ pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
         return report;
     }
 
-    if !folder_is_writable(&dir) {
+    if !engine::folder_is_writable(&dir) {
         report.err(
             "That folder cannot be written to. It is either read-only or somewhere that needs \
              administrator rights -- run this installer as administrator, or move the game.",
@@ -466,7 +426,7 @@ pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     // fs::copy come back with "Acesso negado" halfway through.
     let held: Vec<&str> = [ADDON_NAME, RUNTIME_NAME, WEIGHTS_NAME]
         .into_iter()
-        .filter(|n| is_locked(&dir.join(n)))
+        .filter(|n| engine::is_locked(&dir.join(n)))
         .collect();
     if !held.is_empty() {
         report.err(format!(
@@ -482,11 +442,11 @@ pub fn preflight(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     for (name, size) in
         [(ADDON_NAME, ADDON.len() as u64), (RUNTIME_NAME, RUNTIME_SIZE), (WEIGHTS_NAME, WEIGHTS_SIZE)]
     {
-        if size_of(&dir.join(name)) != Some(size) {
+        if engine::size_of(&dir.join(name)) != Some(size) {
             need += size;
         }
     }
-    if let Some(free) = free_bytes(&dir) {
+    if let Some(free) = engine::free_bytes(&dir) {
         if need > 0 && free < need {
             report.err(format!(
                 "Not enough room: {} MB free, and this needs {} MB. The weights alone are {} MB.",
@@ -825,6 +785,32 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn the_x64_route_now_refuses_to_install_over_a_file_the_game_is_holding() {
+        let game = temp("x64-locked");
+        let held = game.join(ADDON_NAME);
+        fs::write(&held, b"held open by the running game").unwrap();
+        let mut perms = fs::metadata(&held).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&held, perms).unwrap();
+
+        // Before step 3 this reached fs::write and came back with an OS error partway through.
+        let report = install(game.to_str().unwrap(), "", Preset::Dx11);
+        assert!(report.failed);
+        assert!(
+            has_err(&report, "open by another program"),
+            "{}",
+            report.to_log("locked")
+        );
+        assert!(!game.join(engine::Route::X64.manifest_name()).exists());
+
+        let mut perms = fs::metadata(&held).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&held, perms).unwrap();
+        assert_eq!(fs::read(&held).unwrap(), b"held open by the running game");
     }
 
     #[test]

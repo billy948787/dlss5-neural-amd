@@ -111,7 +111,7 @@ The union is the requirement. A merge that drops either side's safety is not don
 
 ## Sequence
 
-**Steps 1 and 2 are done.** What they turned up, recorded so the rest of the sequence accounts for
+**Steps 1, 2 and 3 are done.** What they turned up, recorded so the rest of the sequence accounts for
 it:
 
 - The engine had to be split. `plan()` is route-specific and `apply()` is not, because the x64 route
@@ -127,6 +127,14 @@ it:
 - Hashing the 147 MB of weights dominates the x64 round trip -- about 78 seconds against real files.
   Streaming instead of reading whole payloads into memory is worth doing, but it is a change to the
   engine's shape and belongs after the routes are unified, not during.
+- The preflight was advice, not a gate: nothing consulted it before writing. Its environment checks
+  now live inside `apply`, so both routes get them by construction rather than by remembering to
+  call them, and a locked file or a read-only folder is refused before the journal exists instead of
+  failing partway through a copy. The panel keeps the advisory version, which also covers the
+  runtime folder the x64 route asks for and the `DisabledAddons=` line, neither of which should
+  block an install.
+- The guard counts the backup as well as the replacement when checking free space. The old panel
+  check predated backups existing, so it under-counted.
 
 1. Port `core.h` into Rust as the single install engine — manifest, backups, journal, ownership,
    safe path handling, PE check, BasePath. Port `tests.cpp` alongside it; keep the existing Rust

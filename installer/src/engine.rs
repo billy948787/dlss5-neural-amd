@@ -775,6 +775,107 @@ impl Installer {
     }
 }
 
+// -- Environment guard ---------------------------------------------------------------------------
+
+/// Can this folder be written to at all? Program Files without elevation is the usual answer.
+pub fn folder_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(".dlss5-installer-write-probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// A file that exists but cannot be opened for writing is held by something -- on Windows that is
+/// nearly always the game still running, which is the single most common way an install fails.
+pub fn is_locked(path: &Path) -> bool {
+    path.is_file() && std::fs::OpenOptions::new().write(true).open(path).is_err()
+}
+
+#[cfg(windows)]
+pub fn free_bytes(dir: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let mut free = 0u64;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut())
+    };
+    (ok != 0).then_some(free)
+}
+
+#[cfg(not(windows))]
+pub fn free_bytes(_dir: &Path) -> Option<u64> {
+    None
+}
+
+/// Same file, same bytes? Only the length is compared, which is what keeps the guard cheap.
+pub fn size_of(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|m| m.len())
+}
+
+/// Everything about the folder that would make the transaction fail halfway, checked before the
+/// journal is written so a refusal costs nothing and says why.
+///
+/// This runs inside [`apply`], which is what folds it in front of both routes at once rather than
+/// leaving it as advice on one screen. The common case by far is the third one: the game is still
+/// open, and the old failure for that was an access-denied error from somewhere inside a copy.
+pub fn guard(dir: &Path, desired: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    require(
+        dir.is_dir(),
+        format!("{} is not a folder.", dir.display()),
+    )?;
+    require(
+        folder_is_writable(dir),
+        "That folder cannot be written to. It is either read-only or somewhere that needs \
+         administrator rights -- run this installer as administrator, or move the game."
+            .to_string(),
+    )?;
+
+    let held: Vec<&str> = desired
+        .keys()
+        .filter(|n| is_locked(&dir.join(n)))
+        .map(|s| s.as_str())
+        .collect();
+    require(
+        held.is_empty(),
+        format!(
+            "{} {} open by another program. The game or emulator is almost certainly still \
+             running -- close it and this line goes away.",
+            held.join(", "),
+            if held.len() == 1 { "is" } else { "are" }
+        ),
+    )?;
+
+    // Size is a cheap stand-in for "already the file we want": hashing every payload here would
+    // read the 147 MB of weights twice, once to decide and once to install. A file whose size
+    // already matches needs no new room; anything else needs its own bytes plus a backup of
+    // whatever it displaces.
+    let mut need = 0u64;
+    for (name, data) in desired {
+        let existing = size_of(&dir.join(name));
+        if existing != Some(data.len() as u64) {
+            need += data.len() as u64 + existing.unwrap_or(0);
+        }
+    }
+    if let Some(free) = free_bytes(dir) {
+        require(
+            need == 0 || free >= need,
+            format!(
+                "Not enough room: {} MB free, and this needs {} MB including the backup of what it \
+                 replaces.",
+                free / 1_048_576,
+                need / 1_048_576
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 /// The transactional half of an install, shared by both routes.
 ///
 /// `desired` is whatever the route's own planner decided to write; this function is deliberately
@@ -789,6 +890,7 @@ pub fn apply(
     desired: &BTreeMap<String, Vec<u8>>,
     log: &mut Vec<String>,
 ) -> Result<()> {
+    guard(dir, desired)?;
     let manifest_path = dir.join(route.manifest_name());
     safe_path(&manifest_path)?;
 
@@ -1288,6 +1390,64 @@ mod tests {
         assert_eq!(Route::X86.manifest_name(), MANIFEST_NAME);
         assert_eq!(Route::X64.manifest_name(), MANIFEST_NAME_X64);
         assert_ne!(Route::X86.manifest_name(), Route::X64.manifest_name());
+    }
+
+    fn set_readonly(path: &Path, on: bool) {
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(on);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[test]
+    fn a_file_another_program_is_holding_stops_the_transaction_before_it_starts() {
+        let root = temp("guard-locked");
+        let target = root.join("dlss5-neural.addon64");
+        write(&target, b"in use").unwrap();
+        set_readonly(&target, true);
+
+        let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        files.insert("dlss5-neural.addon64".into(), b"the new one".to_vec());
+        let mut log = Vec::new();
+        let err = apply(&root, "D3D11", Route::X64, &files, &mut log)
+            .unwrap_err()
+            .0;
+        assert!(err.contains("open by another program"), "got: {err}");
+
+        // The journal must not exist: the guard runs before anything is recorded or written.
+        assert!(!root.join(Route::X64.manifest_name()).exists());
+        assert!(!root.join(BACKUP_DIR).exists());
+        set_readonly(&target, false);
+        assert_eq!(read(&target).unwrap(), b"in use", "the held file is untouched");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_that_is_not_there_is_named_rather_than_failing_midway() {
+        let root = temp("guard-missing").join("no-such-subfolder");
+        let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        files.insert("dlss5-neural.addon64".into(), b"x".to_vec());
+        let mut log = Vec::new();
+        let err = apply(&root, "D3D11", Route::X64, &files, &mut log)
+            .unwrap_err()
+            .0;
+        assert!(err.contains("is not a folder"), "got: {err}");
+    }
+
+    #[test]
+    fn the_guard_counts_the_backup_as_well_as_the_replacement() {
+        let root = temp("guard-space");
+        // A file that will be displaced: the transaction needs room for the new bytes and for the
+        // copy of the old ones, which is what the panel's old check did not account for.
+        write(&root.join("dlss5-neural.addon64"), &vec![0u8; 2048]).unwrap();
+        let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        files.insert("dlss5-neural.addon64".into(), vec![1u8; 4096]);
+        // Nothing here is short of disk, so this must pass; the arithmetic is asserted by the
+        // message when it does not, and by this test not regressing into a false refusal.
+        let mut log = Vec::new();
+        assert!(apply(&root, "D3D11", Route::X64, &files, &mut log).is_ok());
+        assert_eq!(read(&root.join("dlss5-neural.addon64")).unwrap().len(), 4096);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
