@@ -1180,6 +1180,31 @@ mod tests {
         }
     }
 
+    /// One unpacked release folder has to serve both routes, or the download stops being one
+    /// download. The bridge package keeps its payloads in `files\`; a folder someone unzipped the
+    /// runtime into by itself keeps them loose. Both are field 1.
+    #[test]
+    fn field_one_finds_the_payloads_in_either_shape_of_folder() {
+        let root = temp("payload-dir");
+
+        // Loose, which is what this screen has always asked for.
+        let loose = root.join("loose");
+        fs::create_dir_all(&loose).unwrap();
+        fs::write(loose.join(RUNTIME_NAME), b"stand-in").unwrap();
+        assert_eq!(payload_dir(&loose), loose);
+
+        // A release folder, where they sit under files/ next to the bridge pair.
+        let release = root.join("release");
+        fs::create_dir_all(release.join("files")).unwrap();
+        fs::write(release.join("files").join(RUNTIME_NAME), b"stand-in").unwrap();
+        assert_eq!(payload_dir(&release), release.join("files"));
+
+        // Neither: the folder itself, so the caller reports what is missing by name.
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert_eq!(payload_dir(&empty), empty);
+    }
+
     #[test]
     fn an_executable_names_its_own_width() {
         let dir = temp("detect-exe");
