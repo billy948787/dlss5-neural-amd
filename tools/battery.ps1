@@ -1,7 +1,9 @@
 # One configuration: set the two inis + optional env var, run, pull the numbers that matter.
-param([string]$Label, [string]$NeuralIni = '', [string]$AmdIni = '', [string]$EnvVar = '', [int]$Seconds = 85)
+param([string]$Label, [string]$NeuralIni = '', [string]$AmdIni = '', [string]$EnvVar = '', [int]$Seconds = 85,
+      [string]$GamePath = '')
 
-$nfs = 'D:\SteamLibrary\steamapps\common\Need for Speed'
+. (Join-Path $PSScriptRoot 'find-steam-game.ps1')
+$nfs = Find-SteamGame -Name 'Need for Speed' -Explicit $GamePath -EnvName 'DLSS5_NFS_PATH'
 Get-Process NFS16 -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 8
 
