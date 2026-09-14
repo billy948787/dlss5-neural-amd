@@ -161,13 +161,22 @@ impl Preset {
                  rather than guess. No depth on Vulkan either way: colour and estimated motion."
             }
             Preset::X86Dx11 => {
-                "EXPERIMENTAL. A 32-bit game cannot load the 64-bit runtime, so the add-on runs                  as a pair: a 32-bit frontend in the game and a 64-bit helper beside it, sharing                  frames on the same adapter. Install ReShade with full add-on support as the                  32-bit dxgi.dll."
+                "EXPERIMENTAL. A 32-bit game cannot load the 64-bit runtime, so the add-on runs as \
+                 a pair: a 32-bit frontend inside the game and a 64-bit helper beside it, sharing \
+                 frames on the same adapter. Install ReShade with full add-on support as the \
+                 32-bit dxgi.dll."
             }
             Preset::X86Dx9 => {
-                "EXPERIMENTAL. Same 32-bit pair as D3D11, reached through a private D3D9/D3D11                  stage. D3D9Ex shares GPU textures; plain D3D9 falls back to a CPU round trip                  that costs a fixed few milliseconds a frame no matter how low the scale goes.                  Install ReShade as the 32-bit d3d9.dll."
+                "EXPERIMENTAL. The same 32-bit pair as D3D11, reached through a private D3D9/D3D11 \
+                 stage. D3D9Ex shares GPU textures; plain D3D9 falls back to a CPU round trip that \
+                 costs a fixed few milliseconds every frame, no matter how far the scale is turned \
+                 down. Install ReShade as the 32-bit d3d9.dll."
             }
             Preset::X86Dx8 => {
-                "EXPERIMENTAL. D3D8 is translated to D3D9 by the pinned d3d8to9 build and then                  takes the D3D9 route; there is no second renderer. A game that already has its                  own d3d8.dll wrapper keeps it, and the translator is installed beside it as                  d3d8R.dll. Install ReShade as the 32-bit d3d9.dll."
+                "EXPERIMENTAL. D3D8 is translated to D3D9 by the pinned d3d8to9 build and then \
+                 takes the D3D9 route above; there is no second renderer here. A game that already \
+                 ships its own d3d8.dll wrapper keeps it, and the translator is installed beside \
+                 it as d3d8R.dll. Install ReShade as the 32-bit d3d9.dll."
             }
         }
     }
@@ -1152,6 +1161,22 @@ mod tests {
                 "uninstall must not touch the wrapper it never owned"
             );
             assert!(!game.join("d3d8R.dll").exists(), "the translator was ours to remove");
+        }
+    }
+
+    /// The notes are wrapped across source lines with a trailing backslash, which is easy to lose
+    /// in an edit -- and losing it bakes the indentation into the string, where it shows up as a
+    /// run of spaces in the middle of a sentence on screen.
+    #[test]
+    fn no_preset_note_carries_the_indentation_of_its_own_source() {
+        for p in Preset::ALL {
+            let note = p.note();
+            assert!(!note.contains("  "), "{:?} has a run of spaces in it: {note}", p);
+            assert!(!note.contains('\n'), "{:?} has a hard line break; the pane wraps", p);
+            assert!(note.len() > 40, "{:?} has no note worth showing", p);
+        }
+        for p in Preset::ALL {
+            assert!(!p.label().is_empty() && !p.folder_label().trim().is_empty());
         }
     }
 

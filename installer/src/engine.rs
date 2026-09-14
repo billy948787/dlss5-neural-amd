@@ -74,8 +74,14 @@ fn lower(s: &str) -> String {
     s.to_ascii_lowercase()
 }
 
+/// Also strips a UTF-8 byte order mark. ReShade writes its INI with one, which puts an invisible
+/// character in front of the first `[SECTION]` header -- and a header that does not start with `[`
+/// is not a header, so every key in the first section becomes unreachable. That is how Half-Life
+/// 2's `[INSTALL] BasePath` read as absent and sent its install to the game root instead of `bin`.
+/// Treating the mark as leading whitespace fixes reading without rewriting the file, so the mark
+/// survives anything written back.
 fn trim(s: &str) -> &str {
-    s.trim_matches(|c| c == ' ' || c == '\t' || c == '\r' || c == '\n')
+    s.trim_matches(|c| c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\u{feff}')
 }
 
 pub fn read(path: &Path) -> Result<Vec<u8>> {
@@ -1209,6 +1215,18 @@ mod tests {
         let again = set_ini(&after, "INPUT", "KeyOverlay", "9,0,0,0");
         assert_eq!(get_ini(&again, "INPUT", "KeyOverlay"), "9,0,0,0");
         assert_eq!(get_ini(&again, "OVERLAY", "Window"), "x");
+    }
+
+    #[test]
+    fn an_ini_written_with_a_byte_order_mark_is_still_readable() {
+        // ReShade writes one. Without this the first section is invisible and every key in it
+        // reads as absent, which fails silently: nothing errors, the value is just never found.
+        let with_bom = "\u{feff}[INSTALL]\r\nBasePath=bin\r\n";
+        assert_eq!(get_ini(with_bom, "INSTALL", "BasePath"), "bin");
+        // And editing it keeps the mark, rather than quietly changing the file's encoding.
+        let edited = set_ini(with_bom, "INSTALL", "BasePath", "other");
+        assert!(edited.starts_with('\u{feff}'), "the mark must survive a write");
+        assert_eq!(get_ini(&edited, "INSTALL", "BasePath"), "other");
     }
 
     #[test]
