@@ -545,6 +545,7 @@ in section 1, and GTA IV and Half-Life 2 were revalidated on the committed tree 
 - `CHANGELOG.md` — detailed history and measured rationale.
 - `docs/x86bridge.md` — protocol v2, ownership, control and frame flow.
 - `docs/x86bridge-install.md` — installer safety, payload rules and manual regression plan.
+- `docs/installer-merge.md` — decisions for folding the two installers into one; not implemented.
 - `build-x86bridge.ps1` — authoritative integrated x86 build/test entry point.
 - `src/x86bridge/frontend32.cpp` — native x86 capture/staging/lifecycle code.
 - `src/x86bridge/host64.cpp` — x64 helper and engine integration.
