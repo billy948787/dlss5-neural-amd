@@ -50,7 +50,10 @@ tests run in CI, while live game/GPU validation remains required. See
 
 Every tool for DLSS 5 (renodx-dlss, DLSS5-Feeder, DLSS5-Swapper) calls NVIDIA's
 `nvngx_dlssnr.dll`, so none of them do anything on a Radeon. This one drives the AMD port of the
-network instead, from a ReShade add-on.
+network instead, from a ReShade add-on. That port is
+**[DLSS-NR-on-AMD](https://github.com/danielblnc/DLSS-NR-on-AMD)** by danielblnc — it is what makes
+any of this possible, and this project builds on it rather than replacing it. See
+[Credits](#credits).
 
 **The focus is Direct3D 11 games and emulators.** That is not a limitation, it is where this
 works best: D3D11 is the only path where the game's own depth and motion vectors reach the
@@ -128,7 +131,8 @@ channel on the **[discord](https://discord.gg/wYhvS3JSHM)**. They are **not in t
 never will be**: the weights are NVIDIA-derived and the runtime comes from a third-party project
 with its own distribution terms.
 
-The runtime is **DLSS-NR-on-AMD v0.2.17**, rebuilt without the spin cap, so no patching. If you
+The runtime is **[DLSS-NR-on-AMD](https://github.com/danielblnc/DLSS-NR-on-AMD) v0.2.17**, rebuilt
+without the spin cap, so no patching. If you
 would rather build it yourself than trust a file from a chat channel, see
 [Rebuilding the runtime yourself](#rebuilding-the-runtime-yourself): one command, and it needs
 nothing but that project's own installer, which is never executed.
@@ -724,6 +728,26 @@ What support actually buys, in the order it would get spent:
 
 If this saved you a weekend, or if you just want to see where it goes, a coffee genuinely helps.
 If it didn't, don't — the code is MIT either way and nothing is gated behind a donation.
+
+## Credits
+
+This add-on is downstream of **[DLSS-NR-on-AMD](https://github.com/danielblnc/DLSS-NR-on-AMD)** by
+**danielblnc**. That project is the one that got DLSS 5's neural rendering running on Radeon at
+all: it produces both files this add-on cannot work without —
+
+- `dlssnr_amd_pass1.dll`, the runtime that executes the network;
+- `dlssnr_on_amd_weights.bin`, the weights it runs.
+
+Neither is reimplemented here and neither is redistributed here. What this repository adds is a
+ReShade add-on around that runtime: the D3D11, D3D12 and Vulkan routes, the 32-bit bridge, the
+guide capture, the overlay and the installer. Take the network away and there is nothing left to
+drive.
+
+If you found this project first, go and look at that one. It has its own terms; this repository's
+MIT licence covers only the code in it, not the runtime or the weights.
+
+Thanks also to everyone who ran a build against a game and sent back a log — several of the fixes
+in the changelog exist only because somebody bothered to report what they saw.
 
 ## License
 
