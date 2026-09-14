@@ -149,17 +149,31 @@ You also need the **add-on** build of ReShade (labelled "with full add-on suppor
 ## Or let the installer do it
 
 `dlss5-installer.exe`, on the same Releases page, is the three files and the hash check on one
-screen. Pick the target — PCSX2, RPCS3, D3D11, D3D12 or Vulkan — paste the folder holding the two
-files from the discord, paste the folder the game runs from, press F5. The add-on is compiled into
-it, so it cannot hand out one from a different release than the runtime it was built beside, and
-it verifies both SHA-256s before copying anything.
+screen. Paste the folder holding the two files from the discord, point at the game — the folder it
+runs from, or its .exe — and press F5. The add-on is compiled into it, so it cannot hand out one
+from a different release than the runtime it was built beside, and it verifies both SHA-256s
+before copying anything.
+
+**It works out the target's width itself.** It reads the PE header and offers only the presets that
+exist for it: PCSX2, RPCS3, D3D11, D3D12 or Vulkan for a 64-bit game, and the experimental 32-bit
+bridge presets — D3D11, D3D9 or D3D8 — for a 32-bit one. It says which executable it read, and if a
+folder holds a 32-bit launcher beside a 64-bit game it says that too rather than guessing. There is
+one installer for both architectures; the separate x86 build was retired.
 
 Before you press F5 it says what would stop the install: the game still open and holding the
 files, a folder needing administrator rights, no room for the weights, ReShade missing or
 installed twice, and the `DisabledAddons=` line further down this page — the one that makes the
-add-on silently never load. F8 takes everything back out and leaves `dlss5-neural.ini` alone.
+add-on silently never load. The first three are refusals, not warnings: nothing is written until
+they pass, so a failed install cannot leave half of one behind.
 
-It does **not** install ReShade, and is not going to. That stays ReShade's own installer.
+What does get written is recorded — what it installed, what it displaced, and where the backup of
+it went. F8 reads that back, puts any displaced file where it was, and leaves `dlss5-neural.ini`
+alone along with anything you changed after installing.
+
+It does **not** install ReShade on the 64-bit routes, and is not going to. That stays ReShade's own
+installer. The 32-bit bridge is the one exception, and only when a release carries the pinned
+ReShade sidecar: it never downloads anything and never runs ReShade's setup, and a public release
+without that sidecar behaves exactly like the rest — you install ReShade, it checks the hash.
 
 The rest of this section is the same thing by hand, which is worth reading either way: the
 installer copies files, it does not tell you which renderer to set.

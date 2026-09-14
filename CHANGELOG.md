@@ -30,6 +30,21 @@
   and resets history on recovery, instead of permanently faulting the bridge.
 - Add an experimental D3D8 preset through the official, hash-pinned d3d8to9 compatibility layer.
   It translates D3D8 to the native D3D9 frontend and does not restore the old dgVoodoo route.
+- Merge the two installers into one. `installer-x86` was a separate C++ tool with its own Win32
+  GUI covering only the 32-bit routes; its transactional model -- install manifest, backups, journal
+  with rollback, ownership tracking, safe path handling and ReShade `[INSTALL] BasePath` -- was
+  ported into the Rust installer, and both routes now run on it. The x64 route gains backups and a
+  manifest it never had, so an install can be undone precisely instead of by deleting known
+  filenames, and installs made before this keep working through a name-sweep fallback.
+- Detect the target's architecture instead of asking. The installer reads the PE header, names the
+  executable it read, and offers only the presets that exist for that width -- five of the ten
+  API-by-architecture combinations do not. A folder holding both widths is reported rather than
+  guessed at, and PCSX2 and RPCS3 stay named targets with their own guidance.
+- Turn the preflight into a gate. It used to fill a panel and stop there, so an install into a
+  read-only folder, or over a file the game still had open, went ahead and failed partway through a
+  copy. Those checks now run before the journal exists, for both routes, and name the cause.
+- Accept either shape of folder in the first field, and either a folder or an executable as the
+  target.
 - Add an opt-in x86 stage probe behind `DLSS5_X86BRIDGE_TIMING=1`, off by default. It splits the
   bridge into `input+prepare`, `host` and `output` and averages one line per 120 completed frames,
   naming the staging path measured. On classic D3D9 the input and output stages are a full frame
