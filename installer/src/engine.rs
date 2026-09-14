@@ -24,7 +24,29 @@ pub const D3D8TO9_VERSION: &str = "v1.15.1";
 pub const D3D8TO9_COMMIT: &str = "65870f2302e9c496cd6d873d6095961d5c777668";
 pub const D3D8TO9_SHA: &str = "ab6bf7a9a9f4b3e66a75ca038d8d10289c88acbfe8d52c3b5a8a9a259cb26cd5";
 pub const MANIFEST_NAME: &str = "dlss5-x86bridge.install.json";
+pub const MANIFEST_NAME_X64: &str = "dlss5-neural.install.json";
 pub const BACKUP_DIR: &str = ".dlss5-x86bridge-backups";
+
+/// Which side of the bridge an install belongs to. This exists because the preset name alone is
+/// ambiguous: "D3D11" is a valid preset on both routes, and without this a 64-bit install and a
+/// 32-bit one would look interchangeable to `install`, which refuses only a *different* preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    X86,
+    X64,
+}
+
+impl Route {
+    /// x86 keeps the name `installer-x86` already wrote, so existing installs stay readable and the
+    /// C++ tool still interoperates during the transition. x64 has no installs in the wild yet, so
+    /// it gets the neutral name now, while renaming is still free.
+    pub fn manifest_name(self) -> &'static str {
+        match self {
+            Route::X86 => MANIFEST_NAME,
+            Route::X64 => MANIFEST_NAME_X64,
+        }
+    }
+}
 
 /// Every refusal carries the sentence the user sees. `core.h` threw `std::runtime_error`; the
 /// message text is part of the contract and several are asserted by the tests.
@@ -285,6 +307,7 @@ pub fn allowed() -> &'static BTreeSet<&'static str> {
             "ReShade.ini",
             "dlss5-neural.ini",
             "dlss5-neural.addon32",
+            "dlss5-neural.addon64",
             "dlss5-neural-host64.exe",
             "dlssnr_amd_pass1.dll",
             "dlssnr_on_amd_weights.bin",
@@ -440,14 +463,16 @@ pub struct Entry {
 pub struct Manifest {
     pub preset: String,
     pub state: String,
+    pub route: Route,
     pub entries: Vec<Entry>,
 }
 
 impl Manifest {
-    pub fn new(preset: &str) -> Self {
+    pub fn new(preset: &str, route: Route) -> Self {
         Self {
             preset: preset.to_string(),
             state: "installed".to_string(),
+            route,
             entries: Vec::new(),
         }
     }
@@ -461,7 +486,12 @@ pub fn encode(m: &Manifest) -> String {
     o.push_str(&m.preset);
     o.push_str("\",\n\"state\":\"");
     o.push_str(&m.state);
-    o.push_str("\",\n\"bridge_protocol\":2,\n\"dgVoodoo\":\"none\",\n\"ReShade\":\"6.8.0.2156 Full Add-on Support\",\n\"files\":[\n");
+    o.push_str("\",\n");
+    // Emitted only for x64, so every x86 manifest already on disk still round-trips byte for byte.
+    if m.route == Route::X64 {
+        o.push_str("\"route\":\"x64\",\n");
+    }
+    o.push_str("\"bridge_protocol\":2,\n\"dgVoodoo\":\"none\",\n\"ReShade\":\"6.8.0.2156 Full Add-on Support\",\n\"files\":[\n");
     for (i, e) in m.entries.iter().enumerate() {
         o.push_str(&format!(
             "{{\"name\":\"{}\",\"sha256\":\"{}\",\"backup\":\"{}\",\"backup_sha256\":\"{}\",\"owned\":{},\"configuration\":{}}}{}\n",
@@ -495,10 +525,15 @@ fn is_hex(s: &str, len: usize) -> bool {
 pub fn decode(s: &str) -> Result<Manifest> {
     require(s.contains("\"schema\":1,"), "Unknown manifest schema")?;
     let preset = field(s, "preset").unwrap_or_default().to_string();
-    require(
-        matches!(preset.as_str(), "D3D11" | "D3D9" | "D3D8"),
-        "Bad manifest preset",
-    )?;
+    let route = if s.contains("\"route\":\"x64\",") { Route::X64 } else { Route::X86 };
+    let known = match route {
+        Route::X86 => matches!(preset.as_str(), "D3D11" | "D3D9" | "D3D8"),
+        Route::X64 => matches!(
+            preset.as_str(),
+            "PCSX2" | "RPCS3" | "D3D11" | "D3D12" | "Vulkan"
+        ),
+    };
+    require(known, "Bad manifest preset")?;
     let state = field(s, "state").unwrap_or_default().to_string();
     require(
         matches!(state.as_str(), "installed" | "installing"),
@@ -507,6 +542,7 @@ pub fn decode(s: &str) -> Result<Manifest> {
     let mut m = Manifest {
         preset,
         state,
+        route,
         entries: Vec::new(),
     };
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -571,8 +607,9 @@ pub fn decode(s: &str) -> Result<Manifest> {
 /// The journal only means anything if it lands before the writes it describes, so the manifest is
 /// written to a temporary file and moved over the old one through the filesystem's replace.
 pub fn atomic_manifest(dir: &Path, m: &Manifest) -> Result<()> {
-    let final_path = dir.join(MANIFEST_NAME);
-    let tmp = dir.join(format!("{MANIFEST_NAME}.tmp"));
+    let name = m.route.manifest_name();
+    let final_path = dir.join(name);
+    let tmp = dir.join(format!("{name}.tmp"));
     safe_path(&tmp)?;
     write(&tmp, encode(m).as_bytes())?;
     commit_rename(&tmp, &final_path)
@@ -715,133 +752,12 @@ impl Installer {
         Ok(p)
     }
 
+    /// Plan, then apply. The transactional half lives in [`apply`] so the x64 route can reuse it.
     pub fn install(&mut self, target: &Path, preset: &str) -> Result<()> {
         let dir = install_directory(target)?;
         safe_path(&dir)?;
-        safe_path(&dir.join(MANIFEST_NAME))?;
         let desired = self.plan(&absolute(target), preset)?;
-
-        let mut m = Manifest::new(preset);
-        if dir.join(MANIFEST_NAME).exists() {
-            m = decode(&String::from_utf8_lossy(&read(&dir.join(MANIFEST_NAME))?))?;
-            require(m.state == "installed", "Interrupted transaction: run uninstall/recovery before reinstall")?;
-            require(m.preset == preset, "Uninstall previous preset before changing API")?;
-        }
-
-        struct Change { name: String, before: Vec<u8>, after: Vec<u8>, existed: bool }
-        let mut changes: Vec<Change> = Vec::new();
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos().to_string())
-            .unwrap_or_else(|_| "0".into());
-
-        for (name, data) in &desired {
-            let dst = dir.join(name);
-            safe_path(&dst)?;
-            let exists = dst.exists();
-            let wanted = sha(data);
-            let old = if exists { hash_file(&dst)? } else { String::new() };
-            let index = m.entries.iter().position(|x| &x.name == name);
-
-            if exists && old == wanted {
-                self.note(format!("IDENTICAL: {name}"));
-                if index.is_none() {
-                    m.entries.push(Entry {
-                        name: name.clone(),
-                        hash: wanted,
-                        backup: String::new(),
-                        backup_hash: String::new(),
-                        owned: false,
-                        configuration: is_config(name),
-                    });
-                }
-                continue;
-            }
-            if let Some(i) = index {
-                if exists && old != m.entries[i].hash {
-                    if is_config(name) {
-                        self.note(format!("PRESERVED user-modified config: {name}"));
-                        continue;
-                    }
-                    return Err(Error(format!("File changed since install; preserved: {name}")));
-                }
-            }
-            let before = if exists { read(&dst)? } else { Vec::new() };
-            match index {
-                None => {
-                    let mut item = Entry {
-                        name: name.clone(),
-                        hash: wanted,
-                        backup: String::new(),
-                        backup_hash: String::new(),
-                        owned: true,
-                        configuration: is_config(name),
-                    };
-                    if exists {
-                        item.backup = format!("{BACKUP_DIR}/{stamp}/{name}");
-                        item.backup_hash = old.clone();
-                        let bp = dir.join(&item.backup);
-                        safe_path(&bp)?;
-                        make_parent(&bp)?;
-                        write(&bp, &before)?;
-                        hash_is(&read(&bp)?, &old, "Backup")?;
-                        self.note(format!("EXTERNAL backed up: {name}"));
-                    } else {
-                        self.note(format!("CREATE: {name}"));
-                    }
-                    m.entries.push(item);
-                }
-                Some(i) => {
-                    if !m.entries[i].owned && exists {
-                        let backup = format!("{BACKUP_DIR}/{stamp}/{name}");
-                        let bp = dir.join(&backup);
-                        safe_path(&bp)?;
-                        make_parent(&bp)?;
-                        write(&bp, &before)?;
-                        hash_is(&read(&bp)?, &old, "Upgrade backup")?;
-                        m.entries[i].backup = backup;
-                        m.entries[i].backup_hash = old.clone();
-                    }
-                    m.entries[i].hash = wanted;
-                    m.entries[i].owned = true;
-                }
-            }
-            changes.push(Change { name: name.clone(), before, after: data.clone(), existed: exists });
-        }
-
-        // Journal precedes target writes. Uninstall can recover interrupted installs using hashes.
-        let had_manifest = dir.join(MANIFEST_NAME).exists();
-        let old_manifest = if had_manifest { read(&dir.join(MANIFEST_NAME))? } else { Vec::new() };
-        m.state = "installing".into();
-        atomic_manifest(&dir, &m)?;
-
-        let mut applied: std::result::Result<(), Error> = Ok(());
-        for c in &changes {
-            if let Err(e) = write(&dir.join(&c.name), &c.after) {
-                applied = Err(e);
-                break;
-            }
-        }
-        if applied.is_ok() {
-            m.state = "installed".into();
-            applied = atomic_manifest(&dir, &m);
-        }
-        if let Err(e) = applied {
-            for c in changes.iter().rev() {
-                if c.existed {
-                    let _ = write(&dir.join(&c.name), &c.before);
-                } else {
-                    let _ = std::fs::remove_file(dir.join(&c.name));
-                }
-            }
-            if had_manifest {
-                let _ = write(&dir.join(MANIFEST_NAME), &old_manifest);
-            } else {
-                let _ = std::fs::remove_file(dir.join(MANIFEST_NAME));
-            }
-            return Err(e);
-        }
-
+        apply(&dir, preset, Route::X86, &desired, &mut self.log)?;
         let how = if preset == "D3D8" {
             format!("d3d8to9 {D3D8TO9_VERSION} -> native D3D9 frontend")
         } else {
@@ -852,64 +768,248 @@ impl Installer {
     }
 
     pub fn uninstall(&mut self, directory: &Path, remove_configs: bool) -> Result<()> {
-        let dir = absolute(directory);
-        safe_path(&dir)?;
-        safe_path(&dir.join(MANIFEST_NAME))?;
-        require(dir.join(MANIFEST_NAME).exists(), "No x86 install manifest")?;
-        let mut m = decode(&String::from_utf8_lossy(&read(&dir.join(MANIFEST_NAME))?))?;
-        let mut keep: Vec<Entry> = Vec::new();
+        let mut log = std::mem::take(&mut self.log);
+        let outcome = uninstall(directory, Route::X86, remove_configs, &mut log);
+        self.log = log;
+        outcome
+    }
+}
 
-        for e in &m.entries {
-            let dst = dir.join(&e.name);
-            safe_path(&dst)?;
-            if !e.owned {
-                self.note(format!("PRESERVED pre-existing identical file: {}", e.name));
-                continue;
+/// The transactional half of an install, shared by both routes.
+///
+/// `desired` is whatever the route's own planner decided to write; this function is deliberately
+/// ignorant of what those files mean. It records ownership, backs up anything it is about to
+/// displace, writes the journal *before* touching a target, and restores everything it moved if any
+/// write fails. Splitting it out is what lets the x64 route gain backups and a manifest without
+/// inheriting the x86 payload rules.
+pub fn apply(
+    dir: &Path,
+    preset: &str,
+    route: Route,
+    desired: &BTreeMap<String, Vec<u8>>,
+    log: &mut Vec<String>,
+) -> Result<()> {
+    let manifest_path = dir.join(route.manifest_name());
+    safe_path(&manifest_path)?;
+
+    let mut m = Manifest::new(preset, route);
+    if manifest_path.exists() {
+        m = decode(&String::from_utf8_lossy(&read(&manifest_path)?))?;
+        require(
+            m.state == "installed",
+            "Interrupted transaction: run uninstall/recovery before reinstall",
+        )?;
+        require(
+            m.preset == preset,
+            "Uninstall previous preset before changing API",
+        )?;
+        require(
+            m.route == route,
+            "That folder already has an install for the other architecture; uninstall it first",
+        )?;
+    }
+
+    struct Change {
+        name: String,
+        before: Vec<u8>,
+        after: Vec<u8>,
+        existed: bool,
+    }
+    let mut changes: Vec<Change> = Vec::new();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos().to_string())
+        .unwrap_or_else(|_| "0".into());
+
+    for (name, data) in desired {
+        require(
+            allowed().contains(name.as_str()),
+            format!("Refusing to install an unmanaged filename: {name}"),
+        )?;
+        let dst = dir.join(name);
+        safe_path(&dst)?;
+        let exists = dst.exists();
+        let wanted = sha(data);
+        let old = if exists { hash_file(&dst)? } else { String::new() };
+        let index = m.entries.iter().position(|x| &x.name == name);
+
+        if exists && old == wanted {
+            log.push(format!("IDENTICAL: {name}"));
+            if index.is_none() {
+                m.entries.push(Entry {
+                    name: name.clone(),
+                    hash: wanted,
+                    backup: String::new(),
+                    backup_hash: String::new(),
+                    owned: false,
+                    configuration: is_config(name),
+                });
             }
-            if !e.backup.is_empty() {
-                safe_path(&dir.join(&e.backup))?;
-                hash_is(&read(&dir.join(&e.backup))?, &e.backup_hash, "Original backup")?;
-            }
-            if dst.exists() && hash_file(&dst)? != e.hash {
-                if m.state == "installing"
-                    && !e.backup.is_empty()
-                    && hash_file(&dst)? == e.backup_hash
-                {
-                    let _ = std::fs::remove_file(dir.join(&e.backup));
+            continue;
+        }
+        if let Some(i) = index {
+            if exists && old != m.entries[i].hash {
+                if is_config(name) {
+                    log.push(format!("PRESERVED user-modified config: {name}"));
                     continue;
                 }
-                self.note(format!("WARNING modified after install; retained with backup: {}", e.name));
-                keep.push(e.clone());
-                continue;
-            }
-            if !dst.exists() && e.backup.is_empty() {
-                continue;
-            }
-            if e.configuration && e.backup.is_empty() && !remove_configs {
-                self.note(format!("PRESERVED personal/default configuration: {}", e.name));
-                keep.push(e.clone());
-                continue;
-            }
-            if !e.backup.is_empty() {
-                let restored = read(&dir.join(&e.backup))?;
-                write(&dst, &restored)?;
-                let _ = std::fs::remove_file(dir.join(&e.backup));
-                self.note(format!("RESTORED: {}", e.name));
-            } else {
-                let _ = std::fs::remove_file(&dst);
-                self.note(format!("REMOVED: {}", e.name));
+                return Err(Error(format!("File changed since install; preserved: {name}")));
             }
         }
-        if keep.is_empty() {
-            let _ = std::fs::remove_file(dir.join(MANIFEST_NAME));
-        } else {
-            m.entries = keep;
-            m.state = "installed".into();
-            atomic_manifest(&dir, &m)?;
+        let before = if exists { read(&dst)? } else { Vec::new() };
+        match index {
+            None => {
+                let mut item = Entry {
+                    name: name.clone(),
+                    hash: wanted,
+                    backup: String::new(),
+                    backup_hash: String::new(),
+                    owned: true,
+                    configuration: is_config(name),
+                };
+                if exists {
+                    item.backup = format!("{BACKUP_DIR}/{stamp}/{name}");
+                    item.backup_hash = old.clone();
+                    let bp = dir.join(&item.backup);
+                    safe_path(&bp)?;
+                    make_parent(&bp)?;
+                    write(&bp, &before)?;
+                    hash_is(&read(&bp)?, &old, "Backup")?;
+                    log.push(format!("EXTERNAL backed up: {name}"));
+                } else {
+                    log.push(format!("CREATE: {name}"));
+                }
+                m.entries.push(item);
+            }
+            Some(i) => {
+                if !m.entries[i].owned && exists {
+                    let backup = format!("{BACKUP_DIR}/{stamp}/{name}");
+                    let bp = dir.join(&backup);
+                    safe_path(&bp)?;
+                    make_parent(&bp)?;
+                    write(&bp, &before)?;
+                    hash_is(&read(&bp)?, &old, "Upgrade backup")?;
+                    m.entries[i].backup = backup;
+                    m.entries[i].backup_hash = old.clone();
+                }
+                m.entries[i].hash = wanted;
+                m.entries[i].owned = true;
+            }
         }
-        self.note("Uninstall complete; retained files/backups are listed above.");
-        Ok(())
+        changes.push(Change {
+            name: name.clone(),
+            before,
+            after: data.clone(),
+            existed: exists,
+        });
     }
+
+    // Journal precedes target writes. Uninstall can recover interrupted installs using hashes.
+    let had_manifest = manifest_path.exists();
+    let old_manifest = if had_manifest {
+        read(&manifest_path)?
+    } else {
+        Vec::new()
+    };
+    m.state = "installing".into();
+    atomic_manifest(dir, &m)?;
+
+    let mut applied: std::result::Result<(), Error> = Ok(());
+    for c in &changes {
+        if let Err(e) = write(&dir.join(&c.name), &c.after) {
+            applied = Err(e);
+            break;
+        }
+    }
+    if applied.is_ok() {
+        m.state = "installed".into();
+        applied = atomic_manifest(dir, &m);
+    }
+    if let Err(e) = applied {
+        for c in changes.iter().rev() {
+            if c.existed {
+                let _ = write(&dir.join(&c.name), &c.before);
+            } else {
+                let _ = std::fs::remove_file(dir.join(&c.name));
+            }
+        }
+        if had_manifest {
+            let _ = write(&manifest_path, &old_manifest);
+        } else {
+            let _ = std::fs::remove_file(&manifest_path);
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Undo an install using its own manifest. Files the installer did not own are left alone, files
+/// the user changed afterwards are kept with a warning, and anything displaced at install time is
+/// put back from its backup.
+pub fn uninstall(
+    dir: &Path,
+    route: Route,
+    remove_configs: bool,
+    log: &mut Vec<String>,
+) -> Result<()> {
+    let dir = absolute(dir);
+    safe_path(&dir)?;
+    let manifest_path = dir.join(route.manifest_name());
+    safe_path(&manifest_path)?;
+    require(manifest_path.exists(), "No install manifest")?;
+    let mut m = decode(&String::from_utf8_lossy(&read(&manifest_path)?))?;
+    let mut keep: Vec<Entry> = Vec::new();
+
+    for e in &m.entries {
+        let dst = dir.join(&e.name);
+        safe_path(&dst)?;
+        if !e.owned {
+            log.push(format!("PRESERVED pre-existing identical file: {}", e.name));
+            continue;
+        }
+        if !e.backup.is_empty() {
+            safe_path(&dir.join(&e.backup))?;
+            hash_is(&read(&dir.join(&e.backup))?, &e.backup_hash, "Original backup")?;
+        }
+        if dst.exists() && hash_file(&dst)? != e.hash {
+            if m.state == "installing" && !e.backup.is_empty() && hash_file(&dst)? == e.backup_hash {
+                let _ = std::fs::remove_file(dir.join(&e.backup));
+                continue;
+            }
+            log.push(format!(
+                "WARNING modified after install; retained with backup: {}",
+                e.name
+            ));
+            keep.push(e.clone());
+            continue;
+        }
+        if !dst.exists() && e.backup.is_empty() {
+            continue;
+        }
+        if e.configuration && e.backup.is_empty() && !remove_configs {
+            log.push(format!("PRESERVED personal/default configuration: {}", e.name));
+            keep.push(e.clone());
+            continue;
+        }
+        if !e.backup.is_empty() {
+            let restored = read(&dir.join(&e.backup))?;
+            write(&dst, &restored)?;
+            let _ = std::fs::remove_file(dir.join(&e.backup));
+            log.push(format!("RESTORED: {}", e.name));
+        } else {
+            let _ = std::fs::remove_file(&dst);
+            log.push(format!("REMOVED: {}", e.name));
+        }
+    }
+    if keep.is_empty() {
+        let _ = std::fs::remove_file(&manifest_path);
+    } else {
+        m.entries = keep;
+        m.state = "installed".into();
+        atomic_manifest(&dir, &m)?;
+    }
+    log.push("Uninstall complete; retained files/backups are listed above.".into());
+    Ok(())
 }
 
 fn make_parent(p: &Path) -> Result<()> {
@@ -1150,15 +1250,61 @@ mod tests {
         let mut app = Installer::new(root.join("release"));
         assert_eq!(
             app.uninstall(&root, false).unwrap_err().0,
-            "No x86 install manifest"
+            "No install manifest"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_x86_manifest_is_still_byte_identical_now_that_routes_exist() {
+        // The route marker must not leak into x86 output, or every existing install breaks.
+        let text = captured_manifest();
+        let m = decode(&text).unwrap();
+        assert_eq!(m.route, Route::X86);
+        assert_eq!(encode(&m), text);
+        assert!(!text.contains("\"route\""));
+    }
+
+    #[test]
+    fn an_x64_manifest_round_trips_and_names_its_route() {
+        let mut m = Manifest::new("Vulkan", Route::X64);
+        m.entries.push(Entry {
+            name: "dlss5-neural.addon64".into(),
+            hash: "a".repeat(64),
+            backup: String::new(),
+            backup_hash: String::new(),
+            owned: true,
+            configuration: false,
+        });
+        let text = encode(&m);
+        assert!(text.contains("\"route\":\"x64\","));
+        assert_eq!(decode(&text).unwrap(), m);
+        // x64 presets are only valid on the x64 route, and vice versa.
+        assert!(decode(&text.replace("\"preset\":\"Vulkan\"", "\"preset\":\"D3D8\"")).is_err());
+    }
+
+    #[test]
+    fn the_two_routes_write_different_manifest_files() {
+        assert_eq!(Route::X86.manifest_name(), MANIFEST_NAME);
+        assert_eq!(Route::X64.manifest_name(), MANIFEST_NAME_X64);
+        assert_ne!(Route::X86.manifest_name(), Route::X64.manifest_name());
+    }
+
+    #[test]
+    fn apply_refuses_a_filename_it_does_not_manage() {
+        let root = temp("unmanaged");
+        let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        files.insert("something-else.dll".into(), b"x".to_vec());
+        let mut log = Vec::new();
+        let err = apply(&root, "D3D11", Route::X64, &files, &mut log).unwrap_err().0;
+        assert!(err.contains("unmanaged filename"), "got: {err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn atomic_manifest_round_trips_through_the_filesystem() {
         let root = temp("atomic");
-        let mut m = Manifest::new("D3D9");
+        let mut m = Manifest::new("D3D9", Route::X86);
         m.entries.push(Entry {
             name: "d3d9.dll".into(),
             hash: RESHADE_SHA.into(),

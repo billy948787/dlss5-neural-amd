@@ -6,6 +6,8 @@ use std::fmt::Write as _;
 use std::fs;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt as _;
+use crate::engine;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The add-on, built into this executable. One file to hand out, and the installer can never
@@ -39,6 +41,18 @@ pub enum Preset {
 impl Preset {
     pub const ALL: [Preset; 5] =
         [Preset::Pcsx2, Preset::Rpcs3, Preset::Dx11, Preset::Dx12, Preset::Vulkan];
+
+    /// The string recorded in the install manifest. Kept separate from `label`, which is prose
+    /// that can be reworded, while this one has to keep matching manifests already on disk.
+    pub fn manifest_preset(self) -> &'static str {
+        match self {
+            Preset::Pcsx2 => "PCSX2",
+            Preset::Rpcs3 => "RPCS3",
+            Preset::Dx11 => "D3D11",
+            Preset::Dx12 => "D3D12",
+            Preset::Vulkan => "Vulkan",
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -174,6 +188,7 @@ impl Report {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn sha256(path: &Path) -> std::io::Result<String> {
     let bytes = fs::read(path)?;
     let mut hasher = Sha256::new();
@@ -242,25 +257,28 @@ fn check_exe(dir: &Path, preset: Preset, report: &mut Report) {
     }
 }
 
-fn copy_verified(
+/// Verify a payload in the folder the user pointed at and hand back its bytes. This is the half of
+/// the old `copy_verified` that decides whether a file is acceptable; whether it then gets written
+/// is [`engine::apply`]'s decision, because that is what records ownership and takes the backup.
+fn verified_payload(
     src_dir: &Path,
-    dst_dir: &Path,
     name: &str,
     want_sha: &str,
     report: &mut Report,
-) -> bool {
+) -> Option<Vec<u8>> {
     let src = src_dir.join(name);
     if !src.is_file() {
         report.err(format!("{name} is not in the runtime folder you gave."));
-        return false;
+        return None;
     }
-    let got = match sha256(&src) {
-        Ok(h) => h,
+    let bytes = match fs::read(&src) {
+        Ok(b) => b,
         Err(e) => {
             report.err(format!("could not read {name}: {e}"));
-            return false;
+            return None;
         }
     };
+    let got = engine::sha(&bytes);
     if got != want_sha {
         if name == RUNTIME_NAME && got.starts_with(&RUNTIME_SHA_0214[..16]) {
             report.err(format!(
@@ -273,26 +291,30 @@ fn copy_verified(
                  got      {got}\n      The add-on hashes the runtime at load and will refuse it."
             ));
         }
-        return false;
+        return None;
     }
-    // Same file already in place: copying it over itself would be a no-op that can still fail on
-    // a locked handle, so say so instead.
-    let dst = dst_dir.join(name);
-    if dst.is_file() && sha256(&dst).map(|h| h == want_sha).unwrap_or(false) {
+    Some(bytes)
+}
+
+/// The engine speaks the x86 installer's vocabulary. Until step 4 unifies the wording, translate it
+/// into the sentences this screen has always printed, so the terminal output does not change shape
+/// underneath people who are following the README.
+fn narrate(line: &str, report: &mut Report) {
+    if let Some(name) = line.strip_prefix("IDENTICAL: ") {
         report.ok(format!("{name} already correct, left alone."));
-        return true;
-    }
-    match fs::copy(&src, &dst) {
-        Ok(_) => {
-            report.ok(format!("{name} copied and verified."));
-            true
-        }
-        Err(e) => {
-            report.err(format!(
-                "could not write {name}: {e}. If the game is open, close it and try again."
-            ));
-            false
-        }
+    } else if let Some(name) = line.strip_prefix("CREATE: ") {
+        report.ok(format!("{name} copied and verified."));
+    } else if let Some(name) = line.strip_prefix("EXTERNAL backed up: ") {
+        report.ok(format!("{name} replaced; the previous file was backed up."));
+    } else if let Some(name) = line.strip_prefix("RESTORED: ") {
+        report.ok(format!("restored {name} from its backup"));
+    } else if let Some(name) = line.strip_prefix("REMOVED: ") {
+        report.ok(format!("removed {name}"));
+    } else if let Some(rest) = line.strip_prefix("WARNING ") {
+        report.warn(rest.to_string());
+    } else {
+        // PRESERVED lines and anything the engine adds later read fine as they are.
+        report.info(line.to_string());
     }
 }
 
@@ -514,12 +536,10 @@ pub fn install(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     check_exe(&dir, preset, &mut report);
     check_reshade(&dir, preset, &mut report);
 
-    match fs::write(dir.join(ADDON_NAME), ADDON) {
-        Ok(()) => report.ok(format!("{ADDON_NAME} written ({} bytes).", ADDON.len())),
-        Err(e) => report.err(format!(
-            "could not write {ADDON_NAME}: {e}. If the game is open, close it and try again."
-        )),
-    }
+    // The add-on is always part of the plan. The runtime and the weights join it only when the
+    // folder holding them was given and every byte checked out.
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    files.insert(ADDON_NAME.to_string(), ADDON.to_vec());
 
     if src.as_os_str().is_empty() {
         report.warn(
@@ -529,8 +549,42 @@ pub fn install(game_dir: &str, runtime_dir: &str, preset: Preset) -> Report {
     } else if !src.is_dir() {
         report.err(format!("{} is not a folder.", src.display()));
     } else {
-        copy_verified(&src, &dir, RUNTIME_NAME, RUNTIME_SHA, &mut report);
-        copy_verified(&src, &dir, WEIGHTS_NAME, WEIGHTS_SHA, &mut report);
+        for (name, want) in [(RUNTIME_NAME, RUNTIME_SHA), (WEIGHTS_NAME, WEIGHTS_SHA)] {
+            if let Some(bytes) = verified_payload(&src, name, want, &mut report) {
+                files.insert(name.to_string(), bytes);
+            }
+        }
+    }
+
+    // A refused payload now stops the whole install rather than leaving the add-on behind on its
+    // own. The transaction is all-or-nothing, which is the point of routing through the engine.
+    if report.failed {
+        report.info("Nothing was written: fix the problem above and run it again.");
+        return report;
+    }
+
+    let mut log = Vec::new();
+    match engine::apply(
+        &dir,
+        preset.manifest_preset(),
+        engine::Route::X64,
+        &files,
+        &mut log,
+    ) {
+        Ok(()) => {
+            for line in &log {
+                narrate(line, &mut report);
+            }
+        }
+        Err(e) => {
+            for line in &log {
+                narrate(line, &mut report);
+            }
+            report.err(format!(
+                "{e}. Nothing was left half-written: the install rolled itself back."
+            ));
+            return report;
+        }
     }
 
     sweep_dead(&dir, &mut report);
@@ -558,20 +612,45 @@ pub fn uninstall(game_dir: &str, _preset: Preset) -> Report {
     }
     report.info(format!("target: {}", dir.display()));
 
-    // Everything the add-on installs or writes. The ini is deliberately not in this list.
-    let mut names: Vec<String> = vec![
-        ADDON_NAME.into(),
-        RUNTIME_NAME.into(),
-        WEIGHTS_NAME.into(),
-        "dlss5-pass1.dll".into(),
-        "dlss5-neural.log".into(),
-        "dlssnr_on_amd.log".into(),
-        "dlssnr_on_amd.ini".into(),
-    ];
-    names.extend(dead_files());
-
     let mut gone = 0usize;
-    for name in &names {
+
+    // An install written by this version has a manifest, so it knows what it owned, what it
+    // displaced and what the user has changed since. Installs from before the manifest existed have
+    // none, and the name sweep below is the only way to take those back.
+    let manifest = dir.join(engine::Route::X64.manifest_name());
+    if manifest.is_file() {
+        let mut log = Vec::new();
+        match engine::uninstall(&dir, engine::Route::X64, false, &mut log) {
+            Ok(()) => {
+                for line in &log {
+                    narrate(line, &mut report);
+                }
+                gone += 1;
+            }
+            Err(e) => report.err(format!("could not undo the recorded install: {e}")),
+        }
+    } else {
+        // Everything the add-on installs. The ini is deliberately not in this list.
+        let mut names: Vec<String> =
+            vec![ADDON_NAME.into(), RUNTIME_NAME.into(), WEIGHTS_NAME.into()];
+        names.extend(dead_files());
+        for name in &names {
+            let p = dir.join(name);
+            if p.is_file() {
+                match fs::remove_file(&p) {
+                    Ok(()) => {
+                        gone += 1;
+                        report.ok(format!("removed {name}"));
+                    }
+                    Err(e) => report.err(format!("could not remove {name}: {e}")),
+                }
+            }
+        }
+    }
+
+    // Written by the add-on itself at run time, so they are never in a manifest and are swept the
+    // same way whichever branch ran above.
+    for name in ["dlss5-pass1.dll", "dlss5-neural.log", "dlssnr_on_amd.log", "dlssnr_on_amd.ini"] {
         let p = dir.join(name);
         if p.is_file() {
             match fs::remove_file(&p) {
@@ -583,7 +662,6 @@ pub fn uninstall(game_dir: &str, _preset: Preset) -> Report {
             }
         }
     }
-
     for folder in ["dlss5-runtime", "dlss5-captures"] {
         let p = dir.join(folder);
         if p.is_dir() {
@@ -683,6 +761,120 @@ mod tests {
         for n in 2..=10 {
             assert!(!game.join(format!("dlssnr_amd_pass{n}.dll")).exists(), "pass{n} survived");
         }
+    }
+
+    #[test]
+    fn an_install_now_records_a_manifest_the_engine_can_read_back() {
+        let game = temp("x64-manifest");
+        let report = install(game.to_str().unwrap(), "", Preset::Dx12);
+        assert!(!report.failed);
+
+        let manifest = game.join(engine::Route::X64.manifest_name());
+        assert!(manifest.is_file(), "the x64 route must now journal what it did");
+        assert_ne!(
+            engine::Route::X64.manifest_name(),
+            engine::MANIFEST_NAME,
+            "an x64 install must not drop the x86 bridge's filename into the folder"
+        );
+
+        let text = String::from_utf8(fs::read(&manifest).unwrap()).unwrap();
+        let m = engine::decode(&text).expect("the manifest we just wrote must decode");
+        assert_eq!(m.preset, "D3D12");
+        assert_eq!(m.route, engine::Route::X64);
+        assert!(m.entries.iter().any(|e| e.name == ADDON_NAME && e.owned));
+    }
+
+    #[test]
+    fn an_add_on_already_in_the_folder_is_backed_up_before_being_replaced() {
+        let game = temp("x64-backup");
+        // Somebody else's file under our name: it must be recoverable, not overwritten silently.
+        fs::write(game.join(ADDON_NAME), b"a different add-on").unwrap();
+
+        let report = install(game.to_str().unwrap(), "", Preset::Dx11);
+        assert!(!report.failed, "{}", report.to_log("backup"));
+        assert_eq!(fs::read(game.join(ADDON_NAME)).unwrap(), ADDON);
+
+        let backups = game.join(engine::BACKUP_DIR);
+        assert!(backups.is_dir(), "the displaced file must be kept");
+        let found = walk(&backups);
+        assert!(
+            found.iter().any(|p| fs::read(p).unwrap() == b"a different add-on"),
+            "the original bytes must be in the backup"
+        );
+
+        // And uninstall puts it back rather than deleting what was not ours to delete.
+        let removed = uninstall(game.to_str().unwrap(), Preset::Dx11);
+        assert!(!removed.failed, "{}", removed.to_log("restore"));
+        assert_eq!(
+            fs::read(game.join(ADDON_NAME)).unwrap(),
+            b"a different add-on",
+            "uninstall must restore the file the install displaced"
+        );
+    }
+
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(entries) = fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    out.extend(walk(&p));
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_install_from_before_the_manifest_existed_can_still_be_uninstalled() {
+        let game = temp("x64-legacy");
+        // Exactly what an older release left behind: our files, no manifest.
+        fs::write(game.join(ADDON_NAME), ADDON).unwrap();
+        fs::write(game.join(RUNTIME_NAME), b"old runtime").unwrap();
+        fs::write(game.join(WEIGHTS_NAME), b"old weights").unwrap();
+        fs::write(game.join("dlss5-neural.ini"), b"[dlss5]\nScale=0.5\n").unwrap();
+        fs::create_dir_all(game.join("dlss5-runtime")).unwrap();
+        assert!(!game.join(engine::Route::X64.manifest_name()).exists());
+
+        let report = uninstall(game.to_str().unwrap(), Preset::Dx11);
+        assert!(!report.failed, "{}", report.to_log("legacy"));
+        for name in [ADDON_NAME, RUNTIME_NAME, WEIGHTS_NAME] {
+            assert!(!game.join(name).exists(), "{name} survived a legacy uninstall");
+        }
+        assert!(!game.join("dlss5-runtime").exists());
+        assert!(game.join("dlss5-neural.ini").is_file(), "the ini is still the user's");
+    }
+
+    #[test]
+    fn a_refused_payload_now_leaves_the_folder_untouched() {
+        let game = temp("x64-atomic");
+        let src = temp("x64-atomic-src");
+        fs::write(src.join(RUNTIME_NAME), b"not the runtime").unwrap();
+        fs::write(src.join(WEIGHTS_NAME), b"not the weights").unwrap();
+
+        let report = install(game.to_str().unwrap(), src.to_str().unwrap(), Preset::Dx11);
+        assert!(report.failed);
+        // The add-on used to be written before the payloads were checked, so a refusal left it
+        // behind on its own. Routing through the engine made the whole thing one transaction.
+        assert!(!game.join(ADDON_NAME).exists(), "nothing may be written when a payload is refused");
+        assert!(!game.join(engine::Route::X64.manifest_name()).exists());
+    }
+
+    #[test]
+    fn the_two_routes_do_not_mistake_each_other_for_the_same_install() {
+        let game = temp("x64-crossroute");
+        assert!(!install(game.to_str().unwrap(), "", Preset::Dx11).failed);
+
+        // An x86 D3D11 install in the same folder must not look like a reinstall of the x64 one.
+        let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        files.insert("dlss5-neural.addon32".into(), b"x86 add-on".to_vec());
+        let mut log = Vec::new();
+        // Different manifest file, so it is a separate install rather than a silent merge.
+        assert!(engine::apply(&game, "D3D11", engine::Route::X86, &files, &mut log).is_ok());
+        assert!(game.join(engine::Route::X64.manifest_name()).is_file());
+        assert!(game.join(engine::MANIFEST_NAME).is_file());
     }
 
     #[test]

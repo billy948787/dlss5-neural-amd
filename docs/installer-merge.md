@@ -4,8 +4,9 @@ There are two installers today. `installer/` is Rust with a ratatui terminal UI 
 routes; `installer-x86/` is C++ with a hand-drawn Win32 GUI and covers the x86 bridge. They do not
 share a line of code, and each has safety the other lacks. This is the plan to make them one.
 
-Nothing here is implemented yet. It records the decisions so the work does not start by
-re-litigating them.
+It records the decisions so the work does not start by re-litigating them. Steps 1 and 2 of the
+sequence are implemented; the table below still describes the two installers as they were when this
+was written, which is the state the remaining steps start from.
 
 ## Where they differ today
 
@@ -109,6 +110,23 @@ log written beside the executable; and the emulator presets with their guidance.
 The union is the requirement. A merge that drops either side's safety is not done.
 
 ## Sequence
+
+**Steps 1 and 2 are done.** What they turned up, recorded so the rest of the sequence accounts for
+it:
+
+- The engine had to be split. `plan()` is route-specific and `apply()` is not, because the x64 route
+  has its own payload rules (an embedded add-on, a user-chosen runtime folder) and could never reuse
+  the x86 planner. Both routes now feed the same transactional writer.
+- The manifest needed a route marker. "D3D11" is a valid preset on both sides, so without one a
+  64-bit install and a 32-bit one look interchangeable. It is emitted only for x64, which keeps every
+  x86 manifest already on disk byte-identical.
+- The two routes write different manifest filenames. x86 keeps the name `installer-x86` wrote; x64
+  takes a neutral one now, while no x64 install exists in the wild and renaming is still free.
+- x64 installs from before this change have no manifest, so uninstall keeps the old name sweep as a
+  fallback. Do not delete that path: it is the only way to take back an older install.
+- Hashing the 147 MB of weights dominates the x64 round trip -- about 78 seconds against real files.
+  Streaming instead of reading whole payloads into memory is worth doing, but it is a change to the
+  engine's shape and belongs after the routes are unified, not during.
 
 1. Port `core.h` into Rust as the single install engine — manifest, backups, journal, ownership,
    safe path handling, PE check, BasePath. Port `tests.cpp` alongside it; keep the existing Rust
