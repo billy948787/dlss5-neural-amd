@@ -18,6 +18,7 @@ build/
 builds/
 build-x86bridge/
 release/
+local-x86-mod-package/
 dlss5-x86bridge-*.zip
 __pycache__/
 *.py[cod]
