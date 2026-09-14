@@ -32,39 +32,27 @@ exists because the one performance cliff ever reported here turned out to be a f
 the game, not the bridge, and guessing had already cost one reverted experiment.
 
 **Nothing changed for D3D11, D3D12 or Vulkan games** beyond the installer. Same add-on, same
-runtime, same pinned v0.2.17 weights.
+routes, same pinned runtime.
 
-## v0.4.1
-
-**Native Vulkan games are now part of the validation set.** The Vulkan route now rejects
-non-graphics present queues safely, rebuilds its imported images across swapchain recreation, and
-recovers its D3D12 work slots after a failed reset or close. The same binary completed 9,240 frames
-in Detroit: Become Human without a skip and 3,600 frames in DOOM Eternal with one transient skip
-during a scale change, followed by automatic recovery.
+**It requires the pinned v0.2.17 runtime.** v0.2.14 is refused. If you are updating from v0.3.0 you
+must replace `dlssnr_amd_pass1.dll` and `dlssnr_on_amd_weights.bin` — see
+[the three files](#the-three-files) for the hashes. Delete `dlssnr_amd_pass2.dll` and `pass3.dll`
+if you still have them; nothing has used them for several releases.
 
 **One package covers every supported renderer.** There is no separate Vulkan build to choose
-between. The Vulkan transport is compiled in and does nothing on a D3D11 or D3D12 game — it hooks
-one import-table entry, and a game that does not import Vulkan has none. The add-on now links the
-MSVC runtime statically too, so a game's private, older Visual C++ DLLs cannot prevent it loading.
+between, and since this release no separate 32-bit installer either. The Vulkan transport is
+compiled in and does nothing on a D3D11 or D3D12 game — it hooks one import-table entry, and a game
+that does not import Vulkan has none. Everything that a game loads links the MSVC runtime
+statically, so a game's private, older Visual C++ DLLs cannot stop it loading.
 
-**This release requires the pinned v0.2.17 runtime.** v0.2.14 is refused. If you are updating
-from v0.3.0, you must replace `dlssnr_amd_pass1.dll` and `dlssnr_on_amd_weights.bin` — see
-[the three files](#the-three-files) for the hashes. Delete `dlssnr_amd_pass2.dll` and
-`pass3.dll` if you still have them; nothing has used them for two releases.
-
-**Vulkan is still experimental — read [Case 3](#case-3--vulkan-experimental) before trying it.**
-It is validated on RPCS3, Detroit: Become Human and DOOM Eternal. It is known not to work on PCSX2,
+**Vulkan is still experimental — read [Case 3](#case-3--vulkan-experimental) before trying it.** It
+is validated on RPCS3, Detroit: Become Human and DOOM Eternal. It is known not to work on PCSX2,
 for a reason that is structural rather than a bug.
 
-**FSR upscaling is still not implemented**, and this release stops calling it upcoming. The
-measurement that closed it is in [Stuff I didn't get to](#stuff-i-didnt-get-to).
+**FSR upscaling is still not implemented.** The measurement that closed it is in
+[Stuff I didn't get to](#stuff-i-didnt-get-to).
 
-**There is an installer now** — `dlss5-installer.exe` on the release, one screen instead of this
-page. It verifies both hashes before copying, and tells you what would stop the install before it
-starts. See [Or let the installer do it](#or-let-the-installer-do-it). It is new; report anything
-it does wrong the same way as anything else.
-
-ReShade add-on that runs the DLSS-NR network on AMD cards.
+Older releases are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Experimental 32-bit bridge
 
@@ -103,6 +91,9 @@ Run so far, on an RX 9070 XT:
 | **RPCS3** | Vulkan | 1,879 frames on the v0.4.0 build, after 3,360 on the previous one. Experimental — see Case 3. |
 | **Detroit: Become Human** | Vulkan | 9,240 frames, no skips, repeated toggles and two complete swapchain rebuilds on v0.4.1. |
 | **DOOM Eternal** | Vulkan | 3,600 frames, one transient skip during a scale change, repeated Alt+Tab rebuilds on v0.4.1. Requires a graphics present queue; see Case 3. |
+| **Half-Life 2** | D3D9, 32-bit | 21,600 frames on v0.5.0, no failures. Takes the shared-GPU path, so it does not pay the classic-D3D9 round trip. |
+| **GTA IV** | D3D9, 32-bit | 15,480 frames on v0.5.0, no failures, across twenty enable/disable cycles and an exclusive-fullscreen Alt+Tab. |
+| **Silent Hill 3** | D3D8, 32-bit | Runs through the pinned d3d8to9 translator on v0.5.0, keeping the game's own PC Fix wrapper. Classic D3D9 staging, so it pays that round trip. |
 
 **Anything else is untested, not unsupported.** There is no whitelist and nothing to compile:
 point ReShade at a D3D11, D3D12 or compatible Vulkan host, drop the same three files beside it, and
@@ -319,8 +310,8 @@ from a previous install, remove it: two ReShade instances in one process is not 
 arrangement.
 
 DOOM Eternal normally presents from an async queue. Set `r_presentFromAsync "0"` so presentation
-uses a graphics-capable queue; otherwise v0.4.1 logs the unsupported queue and leaves the game's
-image untouched. A resize, display-mode change or Alt+Tab may recreate the swapchain. The Vulkan
+uses a graphics-capable queue; otherwise the add-on logs the unsupported queue and leaves the
+game's image untouched. A resize, display-mode change or Alt+Tab may recreate the swapchain. The Vulkan
 bridge now retires and rebuilds every imported image in that case, including when the new
 swapchain has the same dimensions and format.
 
