@@ -602,31 +602,6 @@ uninstall re-hashing before it acts. Changing it changes the manifest format.
 `windows-sys`, so adding the `Win32_Graphics_Gdi` and `Win32_UI_WindowsAndMessaging` features would
 let that paint code be ported onto the same engine if the GUI is wanted back.
 
-### One download instead of two, next release
-
-v0.5.0 ships `dlss5-installer.exe` loose and `dlss5-x86bridge-v0.5.0.zip` beside it. Deliberately
-deferred rather than merged, so the release could go out: the split stays for v0.5.0 and the
-packaging changes land in the next one.
-
-The capability is already there and tested. `payload_dir` makes field 1 accept either shape of
-folder, so one unpacked archive installs a 32-bit game and a 64-bit one from the same place -- the
-64-bit add-on comes out of the installer itself, so the archive needs no counterpart. Verified
-against the real package, and pinned by
-`field_one_finds_the_payloads_in_either_shape_of_folder`.
-
-What is left is naming and packaging, not code:
-
-- The archive is called `dlss5-x86bridge-*`, so nobody with a 64-bit game will download it. It
-  becomes the main download and needs a name that says so.
-- The loose `dlss5-installer.exe` should stop being an attachment. On its own it cannot install a
-  32-bit game -- it has no `payload.sha256` or `files\` beside it -- which is the trap that shipped
-  briefly during v0.5.0 preparation and was caught by trying it as a user would.
-- `tools/package-x86-release.ps1` puts `docs/x86bridge-install.md` in the archive as its README.
-  A general download needs a README covering both routes, and the script's own name stops fitting.
-
-Three attachments afterwards: the archive, `dlss5-neural.addon64` for a manual 64-bit install, and
-the checksums.
-
 ### Housekeeping
 
 `patch_*.py` in `.gitignore` is anchored to the root now, but a file recreated under a name it
