@@ -106,9 +106,10 @@ try {
         if($text -match '(?i)(VCRUNTIME|MSVCP|libgcc|libstdc\+\+)'){throw "Unexpected C++ DLL dependency: $arch"}
         if($arch -eq 'x86' -and $text -match '(?i)(d3d12\.dll|amdhip64_7\.dll|dlssnr_amd_pass1\.dll)'){throw 'Forbidden frontend import'}
     }
-    # The bridge payloads are staged for the installer, which lives in installer/ and is built and
-    # tested with cargo. The C++ installer that used to be compiled here was retired once the Rust
-    # one covered both routes; its fixture moved into installer/src/engine.rs.
+    # The bridge payloads are staged into release/ for whatever installs them: AMD-NR ReShade
+    # Installer pins these three by hash and fetches them from the release, and package-release.ps1
+    # puts the same three in the by-hand archive. Two earlier installers were built from this repo
+    # and both are retired.
     $release=Join-Path $root 'release'
     New-Item -ItemType Directory -Force -Path (Join-Path $release 'files') | Out-Null
     foreach($name in @('dlss5-neural.addon32','dlss5-neural-host64.exe')){

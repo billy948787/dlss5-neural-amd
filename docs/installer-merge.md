@@ -1,5 +1,10 @@
 # Merging the two installers
 
+> **Historical.** Both installers described here are retired, and `installer/` was removed from
+> this repository in v0.5.1. Installing is done by **AMD-NR ReShade Installer**, which lives in its
+> own repository; by hand still works and is in the README. This file is kept for the reasoning
+> behind what the installer has to check before it writes anything, which did not change.
+
 **This merge is done.** There is one installer, `installer/`, and it covers both the x64 routes and
 the x86 bridge. The C++ `installer-x86/` it replaced has been retired.
 
