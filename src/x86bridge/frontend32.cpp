@@ -461,14 +461,20 @@ void ReleaseD3D9Stage()
     g.d3d9Shared = false;
 }
 
+// The transport format for the classic CPU route. The X8 pair is carried as its A8 twin, which
+// is the same four bytes a pixel with one channel the game does not read -- and the reason
+// is not tidiness: B8G8R8X8_UNORM has no typed UAV at all on this hardware, so the x64 host had
+// nowhere to write the corrected image and stopped rather than draw garbage. Measured on a Radeon
+// RX 9070 XT, driver 32.0.31041: format 88 reports uav=0 typed_store=0, format 87 reports both.
+// That is what a D3D9 game with an X8R8G8B8 back buffer -- Oblivion, and most of its generation --
+// ran into. The X8B8G8R8 pair below was already carried as R8G8B8A8_UNORM for the same reason.
 DXGI_FORMAT D3D9CpuFormat(D3DFORMAT format)
 {
     switch (format)
     {
     case D3DFMT_A8R8G8B8:
-        return DXGI_FORMAT_B8G8R8A8_UNORM;
     case D3DFMT_X8R8G8B8:
-        return DXGI_FORMAT_B8G8R8X8_UNORM;
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
     case D3DFMT_A8B8G8R8:
     case D3DFMT_X8B8G8R8:
         return DXGI_FORMAT_R8G8B8A8_UNORM;
