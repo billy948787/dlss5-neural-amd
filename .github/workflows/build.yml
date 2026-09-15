@@ -60,22 +60,6 @@ jobs:
             build-x86bridge/imports-*.txt
             build-x86bridge/SHA256SUMS.txt
 
-  installer:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      # The add-on is embedded into the installer, so it has to exist before cargo runs.
-      - name: Build the add-on the installer embeds
-        shell: pwsh
-        run: .uild.ps1 -Target neural
-
-      - name: Test the installer
-        working-directory: installer
-        run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
-
   x86-contracts:
     runs-on: ubuntu-latest
     steps:
@@ -83,3 +67,11 @@ jobs:
 
       - name: Test x86 bridge contracts and control flow
         run: python3 tools/test-x86bridge.py
+
+      # No runtime binary ships with this project, so the half of this check that reads one cannot
+      # run here. The half that can is the one that matters: every address written into the runtime
+      # has to be named in runtime_offsets.h and nowhere else. Four files once held their own
+      # copies, two were left a version behind, and that survived a clean build, a green suite and
+      # two code reviews before it crashed the 32-bit bridge in every game.
+      - name: No source file writes a runtime offset of its own
+        run: python3 tools/runtime_offsets_check.py

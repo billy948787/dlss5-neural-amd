@@ -6,6 +6,7 @@ unrelated function. The only thing standing between a bad port and that used to 
 disassembly carefully. This is that reading, written down so it runs.
 
     python tools/runtime_offsets_check.py <dlssnr_amd_pass1.dll>
+    python tools/runtime_offsets_check.py            # sources only, no binary needed -- what CI runs
 
 What it proves, in the order of how much each would have caught:
 
@@ -90,11 +91,9 @@ def rip_target(data, delta, rva, length):
 
 
 def main(argv):
-    if len(argv) != 2:
+    if len(argv) > 2:
         print(__doc__)
         return 2
-    dll = Path(argv[1])
-    raw = dll.read_bytes()
 
     bad = []
     def check(ok, said):
@@ -102,13 +101,25 @@ def main(argv):
         if not ok:
             bad.append(said)
 
-    print(f"{dll}\n  against {HEADER.relative_to(ROOT).as_posix()} and every source under src/\n")
-
     # -- The one that would have caught the crash ------------------------------------------------
+    # First, and on its own when no binary is given: it needs nothing but the tree, which is what
+    # lets CI run it. No binary ships with this project, so everything below it cannot run there --
+    # and this is the check that matters most, because the crash it catches survived a clean build,
+    # a green suite and two code reviews.
+    print(f"{HEADER.relative_to(ROOT).as_posix()} and every source under src/\n")
     stray = stray_literals()
     check(not stray, f"no source file writes an offset of its own ({len(stray)} found)")
     for path, number, value in stray:
         print(f"         {path}:{number} writes {value} -- name it in runtime_offsets.h instead")
+
+    if len(argv) == 1:
+        print("\n" + ("PASS (sources only; pass the runtime to check it too)" if not bad
+                      else f"FAIL: {len(bad)} check(s)"))
+        return 0 if not bad else 1
+
+    dll = Path(argv[1])
+    raw = dll.read_bytes()
+    print(f"\n{dll}\n")
 
     # -- The file is the build these offsets belong to -------------------------------------------
     source = (ROOT / "src/neural/neural.cpp").read_text(encoding="utf-8", errors="replace")
