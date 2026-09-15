@@ -84,6 +84,11 @@ try {
         if($LASTEXITCODE -ne 0){throw "IPC test compile failed: $arch"}
         & $ioTest | Tee-Object -FilePath (Join-Path $out "io-test-$arch.log")
         if($LASTEXITCODE -ne 0){throw "IPC test failed: $arch"}
+        $captureTest=Join-Path $out "capture-test-$arch.exe"
+        & $cl @flags (Join-Path $root 'src/x86bridge/capture_test.cpp') "/Fo$out\capture-test-$arch.obj" /link "/OUT:$captureTest" user32.lib 2>&1 | Tee-Object -FilePath (Join-Path $out "capture-test-build-$arch.log")
+        if($LASTEXITCODE -ne 0){throw "Hotkey capture test compile failed: $arch"}
+        & $captureTest | Tee-Object -FilePath (Join-Path $out "capture-test-$arch.log")
+        if($LASTEXITCODE -ne 0){throw "Hotkey capture test failed: $arch"}
         if($arch -eq 'x86'){
             $binary=Join-Path $out 'dlss5-neural.addon32'
             & $cl @flags /LD (Join-Path $root 'src/x86bridge/frontend32.cpp') "/Fo$out\frontend32.obj" /link /DLL "/OUT:$binary" user32.lib d3d9.lib d3d11.lib dxgi.lib d3dcompiler.lib 2>&1 | Tee-Object -FilePath (Join-Path $out 'build-x86.log')
@@ -118,6 +123,6 @@ try {
     $original=Join-Path $root 'build/dlss5-neural.addon64';if(!(Test-Path -LiteralPath $original)){throw 'Integrated addon64 output missing'}
     PE $original 0x8664
     Get-ChildItem -LiteralPath $out -File | Where-Object {$_.Name -ne 'SHA256SUMS.txt'} | Sort-Object Name | ForEach-Object {"$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)  $($_.Name)"} | Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt')
-    Write-Host 'PASS native x86/x64 builds, protocol tests, PE, imports and integrated addon64 build. GPU/game tests still require live validation.'
+    Write-Host 'PASS native x86/x64 builds, protocol, IPC and hotkey-capture tests, PE, imports and integrated addon64 build. GPU/game tests still require live validation.'
     Write-Host "Outputs: $out"
 } finally {Pop-Location}

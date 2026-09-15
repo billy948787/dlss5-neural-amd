@@ -13,6 +13,8 @@
 #include <wrl/client.h>
 
 #include "build_config.h"
+#include "hotkey_capture.h"
+#include "ini_text.h"
 #if DLSS5_WITH_VULKAN
 #include <MinHook.h>
 #include "../vkshared/vk_raw.inc"
@@ -1394,6 +1396,9 @@ void EnsureNeuralIni()
 void LoadSettings()
 {
     const auto ini = (ExeDirectory() / L"dlss5-neural.ini").wstring();
+    if (ini_text::StripUtf8Bom(ini))
+        Log("removed a UTF-8 byte-order mark from dlss5-neural.ini: it was hiding every setting "
+            "in the file, and all of them were reading as their defaults.");
     auto num = [&](const wchar_t *key, float fallback) {
         wchar_t buf[64] {};
         if (GetPrivateProfileStringW(L"dlss5", key, L"", buf, 64, ini.c_str()) == 0)
@@ -4921,7 +4926,7 @@ void StatusLine()
     }
 }
 
-void OnOverlay(effect_runtime *)
+void OnOverlay(effect_runtime *runtime)
 {
     bool on = g.enabled.load();
     if (ImGui::Checkbox(T("Enabled", "Ligado"), &on))
@@ -4977,12 +4982,13 @@ void OnOverlay(effect_runtime *)
 
         // Rebinding by capturing a real keypress, rather than by typing a virtual-key code.
         // Only advances while the overlay is open, which is where the button is.
-        static bool capturing = false;
+        static hotkey::Capture capture;
         ImGui::TextUnformatted(T("Toggle hotkey", "Tecla de atalho"));
         ImGui::SameLine();
-        if (ImGui::Button(capturing ? T("press a key (Esc cancels)", "aperte uma tecla (Esc cancela)")
-                                    : hotkey.c_str()))
-            capturing = !capturing;
+        if (ImGui::Button(capture.armed
+                              ? T("press a key (Esc cancels)", "aperte uma tecla (Esc cancela)")
+                              : hotkey.c_str()))
+            capture.Toggle();
         Help("Click, then press the combination you want. Modifiers held at that moment are part "
              "of the binding. Esc cancels and keeps the current one.\n\n"
              "Saved to the ini as ToggleKey (a virtual-key code) and ToggleMods (1 Ctrl, 2 Alt, "
@@ -4995,29 +5001,16 @@ void OnOverlay(effect_runtime *)
              "4 Shift, somados). Uma tecla sem modificador é permitida e vai disparar durante o "
              "jogo normal, então escolha uma que o jogo não use.");
 
-        if (capturing)
+        // ReShade's key state, never GetAsyncKeyState: it hooks that one and answers 0 for every
+        // key while the overlay is blocking the keyboard, which is the whole time this panel is
+        // open. See hotkey_capture.h.
+        int boundKey = 0, boundMods = 0;
+        if (capture.Poll([runtime](int vk) { return runtime->is_key_down(static_cast<uint32_t>(vk)); },
+                         boundKey, boundMods))
         {
-            // From 0x08 so the mouse buttons, which are what clicked the button, cannot bind.
-            for (int vk = 0x08; vk <= 0xFE; ++vk)
-            {
-                if (vk == VK_CONTROL || vk == VK_MENU || vk == VK_SHIFT || vk == VK_LWIN ||
-                    vk == VK_RWIN || vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_LMENU ||
-                    vk == VK_RMENU || vk == VK_LSHIFT || vk == VK_RSHIFT)
-                    continue;
-                if ((GetAsyncKeyState(vk) & 0x8000) == 0)
-                    continue;
-                capturing = false;
-                if (vk == VK_ESCAPE)
-                    break;
-                int mods = 0;
-                if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= 1;
-                if (GetAsyncKeyState(VK_MENU) & 0x8000) mods |= 2;
-                if (GetAsyncKeyState(VK_SHIFT) & 0x8000) mods |= 4;
-                g.toggleKey.store(vk);
-                g.toggleMods.store(mods);
-                Log("menu: toggle bound to %s", HotkeyName().c_str());
-                break;
-            }
+            g.toggleKey.store(boundKey);
+            g.toggleMods.store(boundMods);
+            Log("menu: toggle bound to %s", HotkeyName().c_str());
         }
     }
 

@@ -16,6 +16,8 @@
 #include <string>
 #include "bridge_io.h"
 #include "control_state.h"
+#include "../neural/hotkey_capture.h"
+#include "../neural/ini_text.h"
 #include <cstring>
 using Microsoft::WRL::ComPtr;
 using namespace reshade::api;
@@ -197,9 +199,17 @@ struct StageProbe {
     bool Due() const {return on&&frames>=120;}
     void Drop(){frames=0;input=host=output=0.0;}
 } probe;
+// How stale the overlay stamp may get before a pending rebind is abandoned. It has to
+// outlast the gap between the overlay's draw callbacks, which is far longer than a frame:
+// 672 ms was measured with the panel open, against the 500 ms this used to allow.
+constexpr uint64_t kCaptureIdleMs=3000;
 struct Controls32 {
     x86bridge::WireSettings shadow{};x86bridge::WireStatus status{};
-    bool synced=false,syncRequested=false,save=false,reload=false,factory=false,measure=false,capturing=false,preSyncEnableChanged=false;
+    bool synced=false,syncRequested=false,save=false,reload=false,factory=false,measure=false,preSyncEnableChanged=false;
+    hotkey::Capture capture;
+    // Stamped by the overlay callback, the only place ReShade hands a runtime over. The key
+    // scan runs on the present path and needs it to read ReShade's own key state.
+    effect_runtime* runtime=nullptr;
     uint64_t sentRevision=0,commandId=0,lastStatusAt=0,overlayAt=0;
 } controls;
 void OperationalSettings(){
@@ -215,7 +225,7 @@ void OperationalChanged(){
 }
 void StopHost(){
     // A fatal partial operation is never followed by texture reuse in a new frame.
-    controls.synced=false;controls.status={};controls.save=controls.reload=controls.factory=controls.measure=controls.capturing=false;
+    controls.synced=false;controls.status={};controls.save=controls.reload=controls.factory=controls.measure=false;controls.capture.Cancel();
     g.pipe.reset();if(g.process&&WaitForSingleObject(g.process.value,0)!=WAIT_OBJECT_0){
         TerminateProcess(g.process.value,7);WaitForSingleObject(g.process.value,x86bridge::IpcTimeoutMs);
     }
@@ -813,6 +823,7 @@ void Settings(){
     if(g.settings)return;g.settings=true;
     const auto dir=Directory();logFile=_wfopen((dir/L"dlss5-neural-x86.log").c_str(),L"w");
     const auto ini=(dir/L"dlss5-neural.ini").wstring();
+    if(ini_text::StripUtf8Bom(ini))Log("x86bridge: removed a UTF-8 byte-order mark from dlss5-neural.ini; every setting in it was reading as its default");
     g.enabled=GetPrivateProfileIntW(L"dlss5",L"StartOn",0,ini.c_str())!=0;
     g.toggleKey=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"dlss5",L"ToggleKey",VK_END,ini.c_str())),0,255);
     g.toggleMods=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"dlss5",L"ToggleMods",1,ini.c_str())),0,7);
@@ -961,7 +972,7 @@ void OnDestroy(swapchain* sc,bool resize){
     ReleaseLocal();
     if(!resize){
         if(g.process&&!g.failed){x86bridge::Ack a;x86bridge::Request(g.pipe.value,g.process.value,x86bridge::Kind::Quit,nullptr,0,a);}
-        StopHost();g.active=nullptr;g.game9.Reset();g.game11ctx.Reset();g.game11.Reset();
+        StopHost();g.active=nullptr;controls.runtime=nullptr;g.game9.Reset();g.game11ctx.Reset();g.game11.Reset();
         g.nativeD3D9=false;g.guideDepthCs.Reset();g.guideDepthCsFailed=false;
     }
     Log("x86bridge swapchain retired resize=%d",resize);
@@ -976,8 +987,43 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
     HWND hwnd=static_cast<HWND>(sc->get_hwnd());
     const bool foreground=!hwnd||GetForegroundWindow()==hwnd;
     const int mods=((GetAsyncKeyState(VK_CONTROL)&0x8000)?1:0)|((GetAsyncKeyState(VK_MENU)&0x8000)?2:0)|((GetAsyncKeyState(VK_SHIFT)&0x8000)?4:0);
-    if(controls.capturing&&GetTickCount64()-controls.overlayAt>500)controls.capturing=false;
-    const bool key=!controls.capturing&&foreground&&g.toggleKey!=0&&(GetAsyncKeyState(g.toggleKey)&0x8000)&&(mods&g.toggleMods)==g.toggleMods;
+    // Rebinding runs here, on the present path, and not inside the overlay's draw callback.
+    // The draw callback is not called every frame -- measured at 672 ms between calls with the
+    // panel open -- while this path is. With the scan living in the callback and the 500 ms
+    // cancel living here, the cancel always won and a key was never once scanned for.
+    // One line per arm/disarm, so a rebind that goes nowhere still says where it stopped.
+    static bool wasArmed=false;
+    if(controls.capture.armed!=wasArmed){
+        wasArmed=controls.capture.armed;
+        Log("x86bridge: rebind %s (overlay stamp %llu ms old)",controls.capture.armed?"armed":"disarmed",
+            static_cast<unsigned long long>(GetTickCount64()-controls.overlayAt));
+    }
+    if(controls.capture.armed){
+        // A rebind that outlives the panel is abandoned: with the overlay closed the game gets its
+        // keyboard back, and the next key pressed in play would silently become the binding.
+        if(!controls.runtime||GetTickCount64()-controls.overlayAt>kCaptureIdleMs){
+            Log("x86bridge: rebind gave up, overlay stamp %llu ms old",
+                static_cast<unsigned long long>(GetTickCount64()-controls.overlayAt));
+            controls.capture.Cancel();
+        }else{
+            // ReShade's key state, never GetAsyncKeyState: it hooks that one and answers 0 for
+            // every key while the overlay blocks the keyboard, which is the whole time this panel
+            // is open. See hotkey_capture.h.
+            auto* const runtime=controls.runtime;
+            int boundKey=0,boundMods=0;
+            if(controls.capture.Poll([runtime](int vk){return runtime->is_key_down(static_cast<uint32_t>(vk));},boundKey,boundMods)){
+                // The binding belongs to the synchronised copy, not to g alone: writing g left the
+                // old value on the panel, never reached the host, was never written to the ini, and
+                // was overwritten by the next state snapshot. That is what "the bind cannot be
+                // changed" looked like even on the one occasion a key was captured.
+                controls.shadow.toggleKey=boundKey;controls.shadow.toggleMods=boundMods;
+                ++controls.shadow.settings_revision;
+                OperationalSettings();
+                Log("x86bridge: toggle bound to key %d mods %d",boundKey,boundMods);
+            }
+        }
+    }
+    const bool key=!controls.capture.armed&&foreground&&g.toggleKey!=0&&(GetAsyncKeyState(g.toggleKey)&0x8000)&&(mods&g.toggleMods)==g.toggleMods;
     if(key&&!g.keyDown){if(!controls.synced)controls.preSyncEnableChanged=true;g.enabled=!g.enabled;g.reset=true;if(g.enabled)g.failed=false;Log("x86bridge enabled=%d",g.enabled);}
     g.keyDown=key;
     if(g.disableAltTab&&!foreground){if(!controls.synced&&g.enabled)controls.preSyncEnableChanged=true;g.enabled=false;g.reset=true;}

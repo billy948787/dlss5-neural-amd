@@ -238,12 +238,12 @@ void Draw()
 
         // Rebinding by capturing a real keypress, rather than by typing a virtual-key code.
         // Only advances while the overlay is open, which is where the button is.
-        bool &capturing = controls.capturing;
         ImGui::TextUnformatted(T("Toggle hotkey", "Tecla de atalho"));
         ImGui::SameLine();
-        if (ImGui::Button(capturing ? T("press a key (Esc cancels)", "aperte uma tecla (Esc cancela)")
-                                    : hotkey.c_str()))
-            capturing = !capturing;
+        if (ImGui::Button(controls.capture.armed
+                              ? T("press a key (Esc cancels)", "aperte uma tecla (Esc cancela)")
+                              : hotkey.c_str()))
+            controls.capture.Toggle();
         Help("Click, then press the combination you want. Modifiers held at that moment are part "
              "of the binding. Esc cancels and keeps the current one.\n\n"
              "Saved to the ini as ToggleKey (a virtual-key code) and ToggleMods (1 Ctrl, 2 Alt, "
@@ -256,30 +256,9 @@ void Draw()
              "4 Shift, somados). Uma tecla sem modificador é permitida e vai disparar durante o "
              "jogo normal, então escolha uma que o jogo não use.");
 
-        if (capturing)
-        {
-            // From 0x08 so the mouse buttons, which are what clicked the button, cannot bind.
-            for (int vk = 0x08; vk <= 0xFE; ++vk)
-            {
-                if (vk == VK_CONTROL || vk == VK_MENU || vk == VK_SHIFT || vk == VK_LWIN ||
-                    vk == VK_RWIN || vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_LMENU ||
-                    vk == VK_RMENU || vk == VK_LSHIFT || vk == VK_RSHIFT)
-                    continue;
-                if ((GetAsyncKeyState(vk) & 0x8000) == 0)
-                    continue;
-                capturing = false;
-                if (vk == VK_ESCAPE)
-                    break;
-                int mods = 0;
-                if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= 1;
-                if (GetAsyncKeyState(VK_MENU) & 0x8000) mods |= 2;
-                if (GetAsyncKeyState(VK_SHIFT) & 0x8000) mods |= 4;
-                g.toggleKey.store(vk);
-                g.toggleMods.store(mods);
-                Log("menu: toggle bound to %s", HotkeyName().c_str());
-                break;
-            }
-        }
+        // The key scan itself runs on the present path in frontend32.cpp, not here: this
+        // callback is not called every frame, and a scan that only advances inside it never
+        // outlived the cancel timer. This button only arms it.
     }
 
     int lang = g.language.load();
@@ -1359,11 +1338,14 @@ void OverlayCandidateStatus(){
     ImGui::Text("Motion candidate=%d %ux%u format=%u last_capture_valid=%d",g.guideMotion.chosen.Get()!=nullptr,g.guideMotion.width,g.guideMotion.height,static_cast<unsigned>(g.guideMotion.format),g.guideMotion.ready);
 }
 namespace overlay32 { void CandidateStatus(){OverlayCandidateStatus();} }
-void OnOverlay32(effect_runtime*){
+void OnOverlay32(effect_runtime* runtime){
     // Never block on Present, IPC, or GPU. Present also serializes teardown against this state.
     std::unique_lock<std::mutex> guard(g.lock,std::try_to_lock);
     if(!guard.owns_lock()){ImGui::TextDisabled("x86 bridge is processing the current frame...");return;}
     controls.overlayAt=GetTickCount64();
+    // The only place ReShade hands a runtime over, and the key scan on the present path needs
+    // one to read its key state.
+    controls.runtime=runtime;
     controls.syncRequested=true;
     if(!controls.synced){
         ImGui::TextDisabled(g.failed?"x64 host unavailable. See dlss5-neural-x86.log.":"Synchronizing with x64 host...");
