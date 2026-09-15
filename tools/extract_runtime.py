@@ -10,13 +10,16 @@ There are two trailers to get right, and both were found the hard way:
   * The installer PE is followed by the payload. "End of the installer" is the highest
     (raw pointer + raw size) across its section table, not the file size and not the last
     section in table order.
-  * The payload itself is the DLL plus 242 bytes the setup builder appends. Keep those and every
-    hash is wrong by a tail nobody documents. The same rule finds the DLL's real end: the highest
-    (raw pointer + raw size) across *its* section table.
+  * The payload itself is the DLL plus a tail the setup builder appends -- 242 bytes on v0.2.17,
+    267 on v0.3.0, so it is not a constant to hardcode. Keep those and every hash is wrong by a
+    tail nobody documents. The same rule finds the DLL's real end: the highest (raw pointer +
+    raw size) across *its* section table.
 
-Verified against v0.2.14, v0.2.15, v0.2.16 and v0.2.17. On v0.2.14 the output hashes to
-106223723fd9266c44d38dc2fb77933948ab37803f46bfcea2bae3a0a474ac84, which is the
+Verified against v0.2.14, v0.2.15, v0.2.16, v0.2.17 and v0.3.0. On v0.3.0 the output hashes to
+8321cae728d28cb7632d0d58d3d913e91132bf7645c126505698fbe4cd5a0138, which is the
 `original_sha256` in runtime-patches.json, i.e. the file this add-on's offsets were read out of.
+That is also byte for byte the `version.dll` the setup drops, so a folder that already has one
+does not need the setup run again.
 
 Usage:
     python extract_runtime.py <dlssnr_on_amd_setup.exe> [output.dll]

@@ -28,6 +28,10 @@ Check them against `tools/SHA256SUMS.txt` before using them. The add-on hashes t
 and refuses anything that is not the exact build it was written against, because every offset in it
 is a hardcoded address into that one binary.
 
+**This release moved to the v0.3.0 runtime.** If you are upgrading, replace
+`dlssnr_amd_pass1.dll` — the old one is refused and the log says so by name. The weights did not
+change, so leave `dlssnr_on_amd_weights.bin` where it is.
+
 ## Installing
 
 Everything goes in **the folder the game renders from**, which is not always the folder the game

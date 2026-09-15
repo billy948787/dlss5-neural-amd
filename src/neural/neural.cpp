@@ -635,16 +635,18 @@ void Barrier(ID3D12GraphicsCommandList *c, ID3D12Resource *r, D3D12_RESOURCE_STA
     c->ResourceBarrier(1, &v);
 }
 
-// v0.2.17 of DLSS-NR-on-AMD, lifted out of its setup by tools/extract_runtime.py and run
+// v0.3.0 of DLSS-NR-on-AMD, lifted out of its setup by tools/extract_runtime.py and run
 // through tools/patch_runtime.py -- this is the hash of the patched file, which is what
-// the add-on loads. Every offset below was re-derived against this build. v0.2.14, used
-// until now, has a different .data layout, and the add-on refuses it by name rather than
-// writing into the wrong globals.
-constexpr unsigned char kRuntimeSha256[32] = { 0xdd, 0xd8, 0x2d, 0x31, 0x3a, 0xa7, 0x4c, 0x2e,
-                                               0x76, 0x02, 0xd1, 0x7d, 0xfb, 0x7e, 0x7c, 0xd9,
-                                               0x0c, 0xca, 0x9b, 0xfc, 0x03, 0x06, 0xf5, 0x81,
-                                               0x68, 0x4d, 0x35, 0xd7, 0x5d, 0x1b, 0x35, 0x0b };
-constexpr size_t kRuntimeSize = 7248384;
+// the add-on loads. Every offset below was re-derived against this build. Nothing moved by
+// a constant: the .data globals shifted by 0xa080 near the device pointer, 0xa0e0 across the
+// inline block, 0xa158 across the job block and 0xa160 across the option struct, because
+// v0.3.0 inserts new globals between them. Older builds are refused by hash rather than
+// written into with the wrong addresses.
+constexpr unsigned char kRuntimeSha256[32] = { 0x70, 0xaf, 0x3f, 0xb7, 0x57, 0xf8, 0x3f, 0x71,
+                                               0xec, 0x94, 0x7c, 0xe4, 0x61, 0x97, 0x0f, 0xde,
+                                               0xcc, 0x96, 0x36, 0x86, 0x4b, 0xc0, 0x1d, 0x95,
+                                               0x2a, 0xbf, 0xfb, 0x36, 0xae, 0x31, 0x0b, 0xe6 };
+constexpr size_t kRuntimeSize = 7290880;
 
 template <class T> T &At(HMODULE h, size_t rva)
 {
@@ -1063,9 +1065,9 @@ struct State
     // 0 English, 1 Portugues do Brasil. English by default.
     std::atomic<int> language { 0 };
     // The engine's own option struct, mapped by decompiling its ini reader rather than guessed:
-    //   8d9d0 LocalTone (0.0)   8d9d4 LocalStructure (1.0)   8d9d8 SkinStructure (-1.0)
-    //   8d9dc Scale (0.03125)   8d9e0 UseAutoMask (1)        8d9e4 ToneChannels (0)
-    //   8d9bc Enabled  8d9bd Temporal  8d9be UseFsrInputs  8d9bf UseDepth  8d9c0 Tonemap (-1)
+    //   97b30 LocalTone (0.0)   97b34 LocalStructure (1.0)   97b38 SkinStructure (-1.0)
+    //   97b3c Scale (0.03125)   97b40 UseAutoMask (1)        97b44 ToneChannels (0)
+    //   97b1c Enabled  97b1d Temporal  97b1e UseFsrInputs  97b1f UseDepth  97b20 Tonemap (-1)
     // The last four of these were never written by this add-on, and two were written wrong.
     // Defaults here are the engine's own, so leaving them alone changes nothing.
     std::atomic<int> autoMask { 1 };
@@ -2575,7 +2577,7 @@ bool FinishSubmittedPass()
         return false;
     const UINT64 deadline = GetTickCount64() + 5000;
     while (static_cast<UINT>(InterlockedCompareExchange(
-        reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x8d6f4)), 0, 0)) < g.lastJob)
+        reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x977d4)), 0, 0)) < g.lastJob)
     {
         if (GetTickCount64() >= deadline || DeviceLost())
         {
@@ -2594,7 +2596,7 @@ bool SubmitPrivatePass(ID3D12GraphicsCommandList *cmd, ID3D12CommandAllocator *a
         return false;
     ID3D12CommandList *lists[] {cmd};
     g.queue->ExecuteCommandLists(1, lists);
-    reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9170)(
+    reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9460)(
         g.queue.Get(), 1, lists);
     if (!FinishSubmittedPass())
         return false;
@@ -2659,7 +2661,7 @@ void BridgePresent(device *dev, swapchain *sc)
     const bool jobPending =
         g.fence->GetCompletedValue() < g.completion ||
         static_cast<UINT>(InterlockedCompareExchange(
-            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x8d6f4)), 0, 0)) <
+            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x977d4)), 0, 0)) <
             g.lastJob;
     if (!jobPending && g.jobRunning)
     {
@@ -2792,7 +2794,7 @@ void BridgePresent(device *dev, swapchain *sc)
     ID3D12CommandList *lists[] { cmd };
     g.workQueue->ExecuteCommandLists(1, lists);
     if (g.activePasses != 0)
-        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9170)(
+        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9460)(
             g.workQueue.Get(), 1, lists);
     g.ringValue[i] = ++g.ringSerial;
     g.workQueue->Signal(g.ringFence.Get(), g.ringSerial);
@@ -2899,9 +2901,13 @@ void EnsureEngineIni(const std::filesystem::path &dir)
         Log("could not write %ls; the engine will fall back to its own defaults.", ini.c_str());
         return;
     }
+    // v0.3.0 renamed the inline switch: the key is now `Async`, and it is the inverse of the old
+    // `Inline` (Async=0 means inline). An ini this add-on wrote for v0.2.17 is still correct by
+    // accident -- the unknown `Inline` key is ignored and `Async` defaults to 0 -- so an existing
+    // file is left alone, as it always was.
     f << "[DlssNrOnAmd]\r\n"
          "Enabled=1\r\n"
-         "Inline=1\r\n"
+         "Async=0\r\n"
          "; Host watchdog budget, milliseconds. The network takes about 16 ms at 0.50 scale, so\r\n"
          "; 100 is a wide margin; past it the frame is shown without the effect instead of\r\n"
          "; freezing. Do not raise this much: the engine's own default is 600 ms, and a stall\r\n"
@@ -3126,30 +3132,30 @@ bool InitEngine()
         AddVectoredExceptionHandler(1, NullJumpProbe);
         probeUp = true;
     }
-    At<ID3D12Device *>(h, 0x8cee8) = g.device.Get();
+    At<ID3D12Device *>(h, 0x96f68) = g.device.Get();
     g.device->AddRef();
-    At<ID3D12CommandQueue *>(h, 0x8cef0) = g.queue.Get();
+    At<ID3D12CommandQueue *>(h, 0x96f70) = g.queue.Get();
     g.queue->AddRef();
-    At<int>(h, 0x8dad0) = g.hipDevice;
-    At<uint8_t>(h, 0x8d6c0) = g.inlineMode.load() ? 1 : 0;
-    At<uint8_t>(h, 0x8d82c) = 1;
-    At<uint8_t>(h, 0x8d9bc) = 1;
-    At<uint8_t>(h, 0x8d9be) = 1;
-    At<uint8_t>(h, 0x8d9bf) = 0;
-    At<int>(h, 0x8d9c0) = RuntimeTonemap();
+    At<int>(h, 0x97c30) = g.hipDevice;
+    At<uint8_t>(h, 0x977a0) = g.inlineMode.load() ? 1 : 0;
+    At<uint8_t>(h, 0x97984) = 1;
+    At<uint8_t>(h, 0x97b1c) = 1;
+    At<uint8_t>(h, 0x97b1e) = 1;
+    At<uint8_t>(h, 0x97b1f) = 0;
+    At<int>(h, 0x97b20) = RuntimeTonemap();
     Log("input contract: encoding %d, tonemap requested %d -> runtime %d; FP16 is transport, "
         "not a colour-space declaration. Restart after changing encoding or tonemap.",
         g.encoding.load(), g.tonemap.load(), RuntimeTonemap());
 
     const std::string file = weights.string();
     if (g.hipSet(g.hipDevice) != 0 ||
-        !reinterpret_cast<InitFn>(reinterpret_cast<uintptr_t>(h) + 0x19240)(
-            reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(h) + 0x8cef8), &file))
+        !reinterpret_cast<InitFn>(reinterpret_cast<uintptr_t>(h) + 0x1fe80)(
+            reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(h) + 0x96f78), &file))
     {
         Log("engine init failed.");
         return false;
     }
-    At<uint8_t>(h, 0x8d218) = 1;
+    At<uint8_t>(h, 0x97298) = 1;
     g.runtime = h;
     g.engineReady = true;
     Log("engine ready.");
@@ -3162,8 +3168,8 @@ bool InitEngine()
     // stays at whatever it was. Read-only -- this writes nothing.
     {
         char line[512];
-        int n = std::snprintf(line, sizeof(line), "engine floats 0x8d9c8..0x8d9e4:");
-        for (size_t rva = 0x8d9c8; rva <= 0x8d9e4 && n > 0 && n < static_cast<int>(sizeof(line));
+        int n = std::snprintf(line, sizeof(line), "engine floats 0x97b28..0x97b44:");
+        for (size_t rva = 0x97b28; rva <= 0x97b44 && n > 0 && n < static_cast<int>(sizeof(line));
              rva += 4)
             n += std::snprintf(line + n, sizeof(line) - n, " [%zx]=%.3f", rva,
                                static_cast<double>(At<float>(h, rva)));
@@ -3171,17 +3177,17 @@ bool InitEngine()
         // Dump the byte window the engine has just finished initialising. A field the engine
         // owns holds a plausible default; a field nothing uses holds whatever the loader left.
         // This is read-only and runs after init, so what it prints is the engine's own state.
-        n = std::snprintf(line, sizeof(line), "engine bytes 0x8d9b0..0x8d9c7:");
-        for (size_t rva = 0x8d9b0; rva <= 0x8d9c7 && n > 0 && n < static_cast<int>(sizeof(line));
+        n = std::snprintf(line, sizeof(line), "engine bytes 0x97b10..0x97b27:");
+        for (size_t rva = 0x97b10; rva <= 0x97b27 && n > 0 && n < static_cast<int>(sizeof(line));
              ++rva)
             n += std::snprintf(line + n, sizeof(line) - n, " %02x",
                                static_cast<unsigned>(At<uint8_t>(h, rva)));
         Log("%s", line);
-        Log("  8d9b0 is DepthInverted, pinned to the engine's own default of 1 and no longer a "
-            "control. 8d9e0 UseAutoMask, 8d9e4 ToneChannels and 8d9dc Scale are the fields the "
+        Log("  97b10 is DepthInverted, pinned to the engine's own default of 1 and no longer a "
+            "control. 97b40 UseAutoMask, 97b44 ToneChannels and 97b3c Scale are the fields the "
             "Engine tab writes; what they read back as here is the engine's own state before "
             "this add-on touches them.");
-        Log("  written by this add-on: 8d9d0 tone, 8d9d4 structure, 8d9d8 skin. If one of those "
+        Log("  written by this add-on: 97b30 tone, 97b34 structure, 97b38 skin. If one of those "
             "reads back as something this add-on never wrote, the engine owns it. To find out "
             "whether they change the picture, run the same scene twice with Skin at 0 and at 3 "
             "and compare the 'measure, residual' line -- if it does not move, the slider is inert.");
@@ -3341,12 +3347,12 @@ bool EnsureResources(UINT w, UINT h, DXGI_FORMAT outFormat, float scale)
     {
         const UINT64 deadline = GetTickCount64() + 5000;
         while (static_cast<UINT>(InterlockedCompareExchange(
-                   reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x8d6f4)), 0, 0)) <
+                   reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x977d4)), 0, 0)) <
                    g.lastJob &&
                    GetTickCount64() < deadline)
             Sleep(1);
         if (static_cast<UINT>(InterlockedCompareExchange(
-                reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x8d6f4)), 0, 0)) < g.lastJob)
+                reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x977d4)), 0, 0)) < g.lastJob)
         {
             Log("raster: runtime job %u did not become idle in 5 s; keeping its textures alive "
                 "instead of releasing memory that the GPU may still own.", g.lastJob);
@@ -4429,26 +4435,26 @@ bool RecordNetwork(ID3D12GraphicsCommandList *&cmd, ID3D12Resource *colourSrc,
         // Off by default because these are hardcoded offsets into one specific build: a wrong
         // pointer here does not fail, it hangs the game.
         const bool wantHistory = g.useHistory.load() && g.historyValid.load() && g.history != nullptr;
-        At<uint8_t>(r, 0x8d018) = wantHistory ? 1 : 0;
-        At<void *>(r, 0x8d010) = wantHistory ? static_cast<void *>(g.history.Get()) : nullptr;
+        At<uint8_t>(r, 0x97098) = wantHistory ? 1 : 0;
+        At<void *>(r, 0x97090) = wantHistory ? static_cast<void *>(g.history.Get()) : nullptr;
         if (wantHistory && !g.loggedHistory)
         {
             g.loggedHistory = true;
             Log("history: handing the engine last frame's output at %ux%u. Watch the engine log: "
                 "it says history off in the engine log when it is ignoring this.", g.netWidth, g.netHeight);
         }
-        // 8d9bd is Temporal, not "motion is valid" -- the engine's own ini reader reads the
+        // 97b1d is Temporal, not "motion is valid" -- the engine's own ini reader reads the
         // key "Temporal" into this byte. The old name was a guess and it made the session-2
         // measurement look unexplained: Temporal=1 was the only run where the engine reported
         // non-zero motion, which is not a coincidence, it is what temporal accumulation is for.
         // Auto still follows haveMotion, which is the sane default; the other two are explicit.
         const int tm = g.temporalMode.load();
-        At<uint8_t>(r, 0x8d9bd) =
+        At<uint8_t>(r, 0x97b1d) =
             static_cast<uint8_t>(tm == 1 ? 0 : tm == 2 ? 1 : (haveMotion ? 1 : 0));
         // Never written before. UseAutoMask is the engine's own character masking -- the same
         // field RenoDX exposes as "Character Mask" -- and it defaults to 1, so the add-on was
         // silently relying on the default. ToneChannels and Scale were not known to exist.
-        At<int>(r, 0x8d9e0) = g.autoMask.load();
+        At<int>(r, 0x97b40) = g.autoMask.load();
         // Bits 2 and 4 of ToneChannels stopped being tone channels in v0.2.17. The apply shader
         // now reads them as the timeout policy, in one line:
         //
@@ -4463,26 +4469,26 @@ bool RecordNetwork(ID3D12GraphicsCommandList *&cmd, ID3D12Resource *colourSrc,
         // keep the current frame and never paste a stale correction. Upstream has since made the
         // same choice available as a flag, so the patch is gone and these two bits carry it. Bit 1
         // is the only one left that means what the name says.
-        At<int>(r, 0x8d9e4) = (g.toneChannels.load() & ~2) | 4;
-        At<float>(r, 0x8d9dc) = g.engineScale.load();
-        At<int>(r, 0x8d9c0) = RuntimeTonemap();
-        At<uint8_t>(r, 0x8d6c0) = g.inlineMode.load() ? 1 : 0;
-        At<uint8_t>(r, 0x8d9bf) = haveDepth ? 1 : 0;
-        // 8d9b0 DepthInverted, pinned to the engine's own default. Both runtimes boot this at
+        At<int>(r, 0x97b44) = (g.toneChannels.load() & ~2) | 4;
+        At<float>(r, 0x97b3c) = g.engineScale.load();
+        At<int>(r, 0x97b20) = RuntimeTonemap();
+        At<uint8_t>(r, 0x977a0) = g.inlineMode.load() ? 1 : 0;
+        At<uint8_t>(r, 0x97b1f) = haveDepth ? 1 : 0;
+        // 97b10 DepthInverted, pinned to the engine's own default. Both runtimes boot this at
         // 1 -- the NVIDIA DLL writes options+260 = 1 when the parameter is absent, and the AMD
         // port's static initialiser sets dword_180076E10 = 1 -- and no run here ever produced a
         // reading that told the two settings apart. It was a switch that could only be wrong, so
         // it is written, not exposed.
-        At<UINT>(r, 0x8d9b0) = 1u;
-        At<uint8_t>(r, 0x8d9b4) = 1;
+        At<UINT>(r, 0x97b10) = 1u;
+        At<uint8_t>(r, 0x97b14) = 1;
         // All three come from one place now, and that place is per-pass. Local Tone is written on
         // the first pass only -- which is what the original `i == 0 ? tone : 0.0f` here did, and
         // last session removed it as an asymmetry nobody had chosen. Somebody had: the reference
         // fork's PassProfiles.h makes exactly that choice, in one line, deliberately.
         const PassTune tune = TuningFor(i);
-        At<float>(r, 0x8d9d0) = tune.tone;
-        At<float>(r, 0x8d9d4) = tune.structure;
-        At<float>(r, 0x8d9d8) = tune.skin;
+        At<float>(r, 0x97b30) = tune.tone;
+        At<float>(r, 0x97b34) = tune.structure;
+        At<float>(r, 0x97b38) = tune.skin;
 
         Packet packet {};
         packet.list = cmd;
@@ -4497,22 +4503,22 @@ bool RecordNetwork(ID3D12GraphicsCommandList *&cmd, ID3D12Resource *colourSrc,
         packet.scaleX = 1.0f;
         packet.scaleY = 1.0f;
         // Read before the call so the report below can say whether this pass moved anything.
-        // The marker at 8d908 cannot answer that on its own: pass 1 sets it to cmd, so on pass 2
+        // The marker at 97a60 cannot answer that on its own: pass 1 sets it to cmd, so on pass 2
         // the equality test below is comparing cmd against cmd whatever the engine did, and a
         // silently refused pass 2 would be counted as accepted. The job id is the field that
         // changes per evaluation, so an id that does not move is a pass that did not run.
-        const UINT jobBefore = At<UINT>(r, 0x8d914);
-        reinterpret_cast<RecordFn>(reinterpret_cast<uintptr_t>(r) + 0xf600)(&packet);
-        const UINT jobAfter = At<UINT>(r, 0x8d914);
+        const UINT jobBefore = At<UINT>(r, 0x97a6c);
+        reinterpret_cast<RecordFn>(reinterpret_cast<uintptr_t>(r) + 0x12640)(&packet);
+        const UINT jobAfter = At<UINT>(r, 0x97a6c);
 
-        if (At<uint8_t>(r, 0x8d21a) != 0)
+        if (At<uint8_t>(r, 0x9729a) != 0)
         {
             nativeFailure = true;
             g.failed = true;
             Log("pass %u reported a native failure. Stopping.", i + 1);
             break;
         }
-        if (At<ID3D12CommandList *>(r, 0x8d908) != cmd)
+        if (At<ID3D12CommandList *>(r, 0x97a60) != cmd)
         {
             if (++g.skipped % 600 == 1)
                 Log("pass %u refused (%llu total)", i + 1,
@@ -4520,12 +4526,14 @@ bool RecordNetwork(ID3D12GraphicsCommandList *&cmd, ID3D12Resource *colourSrc,
             break;
         }
         g.lastJob = jobAfter;
-        // v0.2.17: 0x8d808 and 0x8d80c are two watchdog job counters, NOT a
-        // host pointer to an abort word. Its watchdog (0x16462/0x16468) writes
+        // v0.3.0: 0x97950 and 0x97954 are two watchdog job counters, NOT a
+        // host pointer to an abort word. Its watchdog (0x1b27a/0x1b281) writes
         // a job id to each DWORD when a timeout occurs. Interpreting the pair
         // as a pointer then writing through it crashes on the next recording
-        // (reproduced at frame 28 in framecheck). The runtime owns resetting
-        // the real GPU abort flag through hipMemcpyAsync; leave it to do so.
+        // (reproduced at frame 28 in framecheck, against the v0.2.17 pair at
+        // 0x8d808/0x8d80c). The runtime owns resetting the real GPU abort flag
+        // -- v0.2.17 did it with hipMemcpyAsync, v0.3.0 stores straight through
+        // its own host pointer; either way, leave it to do so.
         ++accepted;
 
         // Reported, not enforced. Whether the engine bumps the job id once per recording or once
@@ -4536,7 +4544,7 @@ bool RecordNetwork(ID3D12GraphicsCommandList *&cmd, ID3D12Resource *colourSrc,
             Log("pass %u of %u: job id %u -> %u (%s), list marker %s", i + 1, wanted, jobBefore,
                 jobAfter, jobAfter != jobBefore ? "moved, the engine recorded something"
                                                : "DID NOT MOVE -- this pass may be a no-op",
-                At<ID3D12CommandList *>(r, 0x8d908) == cmd ? "ours" : "not ours");
+                At<ID3D12CommandList *>(r, 0x97a60) == cmd ? "ours" : "not ours");
 
         // Inline submission orders both the image dependency and the CPU tuning.
         // The legacy batch path below only orders resource accesses on the GPU.
@@ -5081,7 +5089,7 @@ void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, 
     const bool jobPending =
         g.fence->GetCompletedValue() < g.completion ||
         static_cast<UINT>(InterlockedCompareExchange(
-            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x8d6f4)), 0, 0)) <
+            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x977d4)), 0, 0)) <
             g.lastJob;
     if (!jobPending && g.jobRunning)
     {
@@ -5117,7 +5125,7 @@ void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, 
     }
     if (!RecordNetwork(cmd, backbuffer, bd.Format, nullptr, runNetwork, wanted, [&]() {
         ID3D12CommandList *submitted[] {cmd};
-        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9170)(
+        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9460)(
             g.queue.Get(), 1, submitted);
         queue->flush_immediate_command_list();
         if (!FinishSubmittedPass())
@@ -5159,7 +5167,7 @@ void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, 
     const UINT nw = g.netWidth, nh = g.netHeight;
     ID3D12CommandList *submitted[] { cmd };
     if (g.activePasses != 0)
-        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9170)(
+        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9460)(
             g.queue.Get(), 1, submitted);
     queue->flush_immediate_command_list();
     DrainReadbacks(nw, nh);
@@ -5962,7 +5970,7 @@ void OnOverlay(effect_runtime *runtime)
              "transforme a imagem.");
         Tag(kTraced);
 
-        // Depth Inverted used to be a checkbox here. It is gone: 8d9b0 is pinned to the
+        // Depth Inverted used to be a checkbox here. It is gone: 97b10 is pinned to the
         // engine's own default of 1 in the record path. No run on either target ever
         // produced a reading that told the two settings apart, so the only thing the switch
         // could do was be set wrong.
@@ -6205,14 +6213,14 @@ void OnOverlay(effect_runtime *runtime)
             g.autoMask.store(mask ? 1 : 0);
             Log("menu: automask %d", mask ? 1 : 0);
         }
-        Help("UseAutoMask, at 8d9e0. The engine's semantic character mask: it is what makes Skin "
+        Help("UseAutoMask, at 97b40. The engine's semantic character mask: it is what makes Skin "
              "Structure Strength apply to characters rather than to the whole frame. This is the "
              "same control RenoDX exposes as Character Mask.\n\n"
              "It defaults to 1 and this add-on never wrote it, so it has always been on by "
              "default. Turning it off is a real test: if Skin stops doing even its measured 1.5%, "
              "the mask is what was carrying it.",
 
-             "UseAutoMask, em 8d9e0. A máscara semântica de personagem do motor: é o que faz a "
+             "UseAutoMask, em 97b40. A máscara semântica de personagem do motor: é o que faz a "
              "Força de Estrutura na Pele se aplicar a personagens em vez do quadro inteiro. É o "
              "mesmo controle que o RenoDX expõe como Character Mask.\n\n"
              "O padrão é 1 e este add-on nunca escrevia esse campo, então sempre esteve ligado "
@@ -6237,7 +6245,7 @@ void OnOverlay(effect_runtime *runtime)
             g.temporalMode.store(tmode);
             Log("menu: temporal %d", tmode);
         }
-        Help("Temporal accumulation, at 8d9bd. This add-on had the byte labelled 'motion is "
+        Help("Temporal accumulation, at 97b1d. This add-on had the byte labelled 'motion is "
              "valid' -- a guess that turned out wrong. The engine's ini reader reads the key "
              "Temporal into it.\n\n"
              "That explains a measurement nobody could account for: Temporal=1 was the only run "
@@ -6246,7 +6254,7 @@ void OnOverlay(effect_runtime *runtime)
              "Auto turns it on whenever a motion field exists, which is the old behaviour. Off "
              "and On are explicit, for A/B.",
 
-             "Acumulação temporal, em 8d9bd. Este add-on rotulava esse byte como 'movimento "
+             "Acumulação temporal, em 97b1d. Este add-on rotulava esse byte como 'movimento "
              "válido' -- um chute que estava errado. O leitor de ini do motor lê a chave "
              "Temporal para ele.\n\n"
              "Isso explica uma medição que ninguém conseguia justificar: Temporal=1 foi a única "
@@ -6274,12 +6282,12 @@ void OnOverlay(effect_runtime *runtime)
         int ch = g.toneChannels.load();
         if (ImGui::SliderInt(T("Tone Channels", "Canais de Tom"), &ch, 0, 3, "%d", 0))
             g.toneChannels.store(ch);
-        Help("ToneChannels, at 8d9e4. An ini key of the engine that nothing in this project knew "
+        Help("ToneChannels, at 97b44. An ini key of the engine that nothing in this project knew "
              "existed until the reader was decompiled. Default 0. What it does is unknown -- it "
              "is here to be A/B'd against the residual, like everything else with an unknown "
              "effect.",
 
-             "ToneChannels, em 8d9e4. Uma chave de ini do motor que ninguém neste projeto sabia "
+             "ToneChannels, em 97b44. Uma chave de ini do motor que ninguém neste projeto sabia "
              "que existia até o leitor ser decompilado. Padrão 0. O que ela faz é desconhecido "
              "-- está aqui para ser testada em A/B contra o resíduo, como tudo que tem efeito "
              "desconhecido.");
@@ -6288,13 +6296,13 @@ void OnOverlay(effect_runtime *runtime)
         float es = g.engineScale.load();
         if (ImGui::SliderFloat(T("Engine Scale", "Escala do Motor"), &es, 0.0f, 1.0f, "%.5f", 0))
             g.engineScale.store(es);
-        Help("Scale, at 8d9dc, default 0.03125. This is the 0.031 that showed up in the startup "
+        Help("Scale, at 97b3c, default 0.03125. This is the 0.031 that showed up in the startup "
              "float dump and was written down as 'a live value we never wrote' -- it is an ini "
              "key of the engine named Scale, and 0.03125 is exactly 1/32.\n\n"
              "Unrelated to Resolution Scale under Performance, which is ours. Nothing is known "
              "about what this one scales. Move it in small steps and watch the residual.",
 
-             "Scale, em 8d9dc, padrão 0.03125. É o 0,031 que apareceu no despejo de floats da "
+             "Scale, em 97b3c, padrão 0.03125. É o 0,031 que apareceu no despejo de floats da "
              "inicialização e foi anotado como 'valor vivo que nunca escrevemos' -- é uma chave "
              "de ini do motor chamada Scale, e 0,03125 é exatamente 1/32.\n\n"
              "Nada a ver com a Escala de Resolução em Desempenho, que é nossa. Nada se sabe "
@@ -6365,8 +6373,8 @@ void OnOverlay(effect_runtime *runtime)
              "para ser usado. Deixado em 1.");
         Tag(kInert);
 
-        ImGui::Text(T("Engine offsets written: 8d9d0 tone, 8d9d4 structure, 8d9d8 skin",
-                      "Offsets escritos no motor: 8d9d0 tom, 8d9d4 estrutura, 8d9d8 pele"));
+        ImGui::Text(T("Engine offsets written: 97b30 tone, 97b34 structure, 97b38 skin",
+                      "Offsets escritos no motor: 97b30 tom, 97b34 estrutura, 97b38 pele"));
         Help("These three are hardcoded RVAs into one specific build of the runtime, found by "
              "matching strings in the binary. That the binary contains the words does not prove "
              "it reads these fields -- an offset written but never read looks identical from out "

@@ -2,6 +2,14 @@
 
 ## v0.5.1 - 2026-09-15 - The hotkey, depth, and not taking the driver down
 
+Requires the pinned **DLSS-NR-on-AMD v0.3.0** runtime; v0.2.14 and v0.2.17 are both refused by
+hash. The weights are unchanged, so an upgrade replaces a 7 MB DLL and downloads nothing else.
+
+- Move to **DLSS-NR-on-AMD v0.3.0**. Every offset this add-on writes into was re-derived against
+  it; see [below](#the-runtime-moved-to-v030).
+- Write `Async=0` rather than `Inline=1` into a new `dlssnr_on_amd.ini`. v0.3.0 renamed that key
+  and inverted it. An ini written by an older release still comes out inline, because the unknown
+  key is ignored and the new one defaults to inline.
 - Fix the toggle hotkey rebind, which could not work for three reasons at once: ReShade answers 0
   for every key through `GetAsyncKeyState` while its overlay holds the keyboard, the captured key
   was written to a copy nothing else reads, and a capture armed on the click frame took the click's
@@ -33,6 +41,61 @@
   be tuned from the file alone with the overlay never opened.
 - Retire the Rust terminal installer. Installing is AMD-NR ReShade Installer, which finds games,
   fetches and verifies the payloads, installs ReShade, and keeps a manifest of what it wrote.
+
+### The runtime moved to v0.3.0
+
+`.hip_fat` is the same size to within 24 bytes and `dlssnr_on_amd_weights.bin` is byte for byte
+the file v0.2.17 used, so the network did not change. `.text` grew 28 KB and `.data` 1 KB, and
+**every offset this add-on writes into moved.** All of them were re-derived against the new
+binary and none carried over on faith. The deltas are not one constant: the device pointer block
+moved by 0xA080, the inline block by 0xA0E0, the job block by 0xA158 and the option struct by
+0xA160, because v0.3.0 inserts new globals between them.
+
+The method was the same one that worked for v0.2.17, and it is worth writing down because it is
+not guesswork. The runtime reads its own settings with `GetPrivateProfileIntA`, so decompiling
+that one function names fourteen of the globals outright — the key string is beside the address
+it writes. The rest came from three functions matched by structure across the two builds: the
+notify entry, identical line for line and the same 0x21C bytes long; the record entry, whose
+first three tests are the same three bytes in the same order; and the weights loader, the same
+0x9A6 bytes with the same `DLSSNR_NO_REPACK` string and the same single call site.
+
+One correction to how this was read last time. Hex-Rays renders `HIDWORD(xmmword_X)` for what is
+sometimes `+4` and sometimes `+0xC`, so the pseudocode alone puts `HipDevice` in the wrong place.
+The disassembly is the ground truth and every address here was taken from it.
+
+| | v0.2.17 | v0.3.0 |
+|---|---|---|
+| notify | 0x9170 | 0x9460 |
+| record | 0xf600 | 0x12640 |
+| weights loader | 0x19240 | 0x1fe80 |
+| watchdog job counters | 0x8d808 / 0x8d80c | 0x97950 / 0x97954 |
+| option struct (Enabled) | 0x8d9bc | 0x97b1c |
+| effective HIP device | 0x8dad0 | 0x97c30 |
+
+The three binary patches moved too — `0x6006` → `0x60a6`, `0x8583` → `0x8873`, `0x6e3db` →
+`0x76c0e` — and are otherwise the same three: kill the runtime's own setup thread, remove the
+doubled `ExecuteCommandLists`, and correct one log string. `tools/patch_runtime.py` refuses a file
+whose hash is not the one in `tools/runtime-patches.json`, so a stale pairing cannot be applied by
+accident.
+
+**What v0.3.0 brings that reaches this route.** The runtime's GPU wait is no longer one long spin
+dispatch: it runs as predicated slices that are preemptible between them, tuned by the new
+`PredWait` and `PredSlice` keys. That is inside the record function, which is the function this
+add-on calls, so it applies here — and it is the right shape for the problem the scale cap in this
+same release works around, because a preemptible wait is far less likely to trip a TDR. Also
+inside the two functions this add-on drives: a per-stage breakdown when a job spikes, which says
+whether the GPU ran slowly throughout or was taken away for one stage, and a check that refuses
+to apply a residual into an output format with no UAV, falling back to frame replacement instead
+of writing nothing.
+
+**What does not.** v0.3.0's pre-upscale mode, its FFX/FSR upscaler detection, its frame-generation
+awareness and its DRED page-fault reporting all live behind the detours the first patch removes.
+This add-on drives the runtime itself and cannot have both, so none of those four are available on
+this route. The packet field that opts into pre-upscale is left zero, which is the default and the
+only correct value here.
+
+Compiled, and the offsets verified statically against both binaries. **Not yet observed in a
+game** — see the validation list in the handoff.
 
 ## v0.5.0 — 2026-09-14 — The 32-bit bridge, D3D8, and one installer
 

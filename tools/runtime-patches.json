@@ -1,22 +1,22 @@
 {
-  "runtime": "DLSS-NR-on-AMD v0.2.17",
-  "original_sha256": "bc97f3b06718e19042acaf227bfe15d1e43d4977f9dc2e39994fcc511445ff4e",
-  "original_size": 7248384,
+  "runtime": "DLSS-NR-on-AMD v0.3.0",
+  "original_sha256": "8321cae728d28cb7632d0d58d3d913e91132bf7645c126505698fbe4cd5a0138",
+  "original_size": 7290880,
   "changes": [
     {
-      "offset": "0x6006",
-      "before": "ff15e4a40700",
+      "offset": "0x60a6",
+      "before": "ff15cc3b0800",
       "after": "31c090909090",
       "reason": "disable the runtime's own setup thread. It exists to install detours on ExecuteCommandLists, the two CreateSwapChain overloads and the two Presents, so that the DLL can drive itself. This add-on drives it instead, and the two cannot both hold the wheel"
     },
     {
-      "offset": "0x8583",
-      "before": "ff156f490800",
+      "offset": "0x8873",
+      "before": "ff15f7e70800",
       "after": "909090909090",
       "reason": "the detour above calls the original ExecuteCommandLists before notifying. The add-on calls that notify entry itself, after its own submit, so the call here would execute the list a second time"
     },
     {
-      "offset": "0x6e3db",
+      "offset": "0x76c0e",
       "before": "70726576696f757320726573696475616c2073686f776e",
       "after": "63757272656e7420696e707574206b6570742020202020",
       "reason": "report the timeout fallback accurately: with ToneChannels bit 4 set and bit 2 clear the shader shows nothing, not the previous residual"

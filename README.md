@@ -51,7 +51,7 @@ all found by a contributor's measured report on Cyberpunk 2077:
   maximum, which `min 0, max 4.4e30, mean NaN` passes. It now counts samples that are actually in
   0..1, says JUNK below 90%, and no longer stops looking after one bad reading.
 
-`tools/d3d12_depth_pick_check.py` holds the six properties the new pick has to have.
+`tools/d3d12_depth_pick_check.py` holds the eight properties the new pick has to have.
 
 **The network can no longer take the display driver down with it.** In inline mode the game's own
 queue waits for the network to finish. On a card that cannot carry the resolution asked of it that
@@ -71,9 +71,10 @@ a reachable overlay -- a game under Lossless Scaling or Magpie, or a headless sw
 games, works out which renderer each one uses, downloads and verifies the runtime and the weights
 for you, and installs ReShade along with the add-on.
 
-**It still requires the pinned v0.2.17 runtime.** v0.2.14 is refused by hash. Delete
-`dlssnr_amd_pass2.dll` and `pass3.dll` if you still have them; nothing has used them for several
-releases.
+**The pinned runtime is now v0.3.0.** v0.2.14 and v0.2.17 are both refused by hash, so an existing
+install has to take the new `dlssnr_amd_pass1.dll` — the installer does that for you, and the
+141 MB of weights are unchanged and are not downloaded again. Delete `dlssnr_amd_pass2.dll` and
+`pass3.dll` if you still have them; nothing has used them for several releases.
 
 **One package covers every supported renderer.** There is no separate Vulkan build to choose
 between, and no separate 32-bit installer. The Vulkan transport is compiled in and does nothing on
@@ -287,8 +288,8 @@ channel on the **[discord](https://discord.gg/wYhvS3JSHM)**. They are **not in t
 never will be**: the weights are NVIDIA-derived and the runtime comes from a third-party project
 with its own distribution terms.
 
-The runtime is **[DLSS-NR-on-AMD](https://github.com/danielblnc/DLSS-NR-on-AMD) v0.2.17**, rebuilt
-without the spin cap, so no patching. If you
+The runtime is **[DLSS-NR-on-AMD](https://github.com/danielblnc/DLSS-NR-on-AMD) v0.3.0**, with the
+three changes `tools/runtime-patches.json` lists and nothing else. If you
 would rather build it yourself than trust a file from a chat channel, see
 [Rebuilding the runtime yourself](#rebuilding-the-runtime-yourself): one command, and it needs
 nothing but that project's own installer, which is never executed.
@@ -560,22 +561,31 @@ having written down, because an offset that is written but never read looks iden
 outside, and this table is what separates the two.
 
 ```
-0x8D9B0 int   DepthInverted   default 1
-0x8D9BC bool  Enabled           0x8D9BD bool Temporal
-0x8D9BE bool  UseFsrInputs      0x8D9BF bool UseDepth
-0x8D9C0 int   Tonemap         default -1
-0x8D9D0 float LocalTone       default 0.0     -> Local Tone Strength
-0x8D9D4 float LocalStructure  default 1.0     -> Structure Intensity
-0x8D9D8 float SkinStructure   default -1.0    -> Skin Structure Strength
-0x8D9DC float Scale           default 0.03125 -> Engine Scale
-0x8D9E0 int   UseAutoMask     default 1       -> Character Mask
-0x8D9E4 int   ToneChannels    default 0       -> Tone Channels
+0x97B10 int   DepthInverted   default 1
+0x97B1C bool  Enabled           0x97B1D bool Temporal
+0x97B1E bool  UseFsrInputs      0x97B1F bool UseDepth
+0x97B20 int   Tonemap         default -1
+0x97B30 float LocalTone       default 0.0     -> Local Tone Strength
+0x97B34 float LocalStructure  default 1.0     -> Structure Intensity
+0x97B38 float SkinStructure   default -1.0    -> Skin Structure Strength
+0x97B3C float Scale           default 0.03125 -> Engine Scale
+0x97B40 int   UseAutoMask     default 1       -> Character Mask
+0x97B44 int   ToneChannels    default 0       -> Tone Channels
 ```
 
-Its full ini surface is `Enabled` `Temporal` `UseFsrInputs` `UseDepth` `Tonemap` `Interop`
-`Inline` `InlineWaitMs` `LocalTone` `LocalStructure` `SkinStructure` `Scale` `UseAutoMask`
-`HipDevice` `ToneChannels`, plus six environment variables: `DLSSNR_NOBLEND`
-`DLSSNR_NOPOSTHIST` `DLSSNR_NO_REPACK` `DLSSNR_SLOW_PREPOST` `DLSSNR_STAGES` `DLSSNR_WBLOG`.
+Those are v0.3.0 addresses. They are not v0.2.17's plus a constant: the globals moved by four
+different amounts because v0.3.0 inserts new ones between them, which is why the add-on refuses
+any build but the one it was read out of.
+
+Its full ini surface is `Enabled` `PredWait` `PredSlice` `Profile` `Temporal` `UseFsrInputs`
+`UseDepth` `Tonemap` `Interop` `Async` `PreHistory` `InlineWaitMs` `LocalTone` `LocalStructure`
+`SkinStructure` `UseAutoMask` `Scale` `PreUpscale` `HipDevice` `ToneChannels`, plus six
+environment variables, unchanged since v0.2.17: `DLSSNR_NOBLEND` `DLSSNR_NOPOSTHIST`
+`DLSSNR_NO_REPACK` `DLSSNR_SLOW_PREPOST` `DLSSNR_STAGES` `DLSSNR_WBLOG`.
+
+**`Inline` became `Async`, and the sense flipped**: `Async=0` is what `Inline=1` used to mean, and
+0 is the default. An ini an older release wrote is still read correctly — the unknown `Inline` key
+is ignored and `Async` falls back to inline — so nothing has to be edited by hand.
 
 `VIT512_OLD` is also an environment variable, read as a bitmask — each bit swaps one kernel
 launch for a legacy one. And `vit512a`, `vit512b`, `vit512_attn`, `vit512_conv1`, `vit512_conv2`

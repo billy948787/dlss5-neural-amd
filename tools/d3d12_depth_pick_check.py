@@ -126,4 +126,4 @@ assert run(steady + [{"moved": moved}] * 3) == "moved"
 #    like one it never clears.
 assert run([{"cleared": (1129, 706, 0, 1)}, {"cleared": (1129, 706, 2400, 0)}] * 3) == "cleared"
 
-print("d3d12 depth pick: 7 properties hold")
+print("d3d12 depth pick: 8 properties hold")

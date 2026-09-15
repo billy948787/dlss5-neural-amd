@@ -10,6 +10,11 @@ into stay valid:
     submission it did not make. Driving it from an add-on means doing both ourselves.
   * one log string, so a timed-out frame does not report a fallback that no longer happens.
 
+The three offsets are file offsets into one exact build, and they moved for v0.3.0: the setup
+thread's `call CreateThread` is at 0x60a6 rather than 0x6006, the doubled ExecuteCommandLists call
+at 0x8873 rather than 0x8583, and the log string at 0x76c0e rather than 0x6e3db. The script
+refuses a file whose hash is not `original_sha256`, so a stale pairing cannot be applied silently.
+
 Two things this used to do and no longer does:
 
   * The shader edit that made a timed-out frame keep its own input rather than paste last frame's
