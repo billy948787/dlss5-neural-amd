@@ -1445,18 +1445,21 @@ int RuntimeTonemap()
 void LoadSettings();
 void SaveSettings(bool quiet = false);
 
-void EnsureNeuralIni()
+// Returns whether it read the settings itself, which it does only on the run that writes the file.
+// The caller uses that to skip a second read: on a first run this used to parse the ini twice and
+// print the same two "settings:" and "compose:" lines twice, describing one state.
+bool EnsureNeuralIni()
 {
     const auto ini = ExeDirectory() / L"dlss5-neural.ini";
     std::error_code ec;
     if (std::filesystem::exists(ini, ec))
-        return;
+        return false;
 
     std::ofstream f(ini, std::ios::binary);
     if (!f)
     {
         Log("could not write %ls; the built-in defaults are used instead.", ini.c_str());
-        return;
+        return false;
     }
     f << "[dlss5]\r\n"
          "; Written because no dlss5-neural.ini was here. Every value below is the default, so\r\n"
@@ -1514,6 +1517,7 @@ void EnsureNeuralIni()
     LoadSettings();
     SaveSettings(/*quiet=*/true);
     Log("wrote a commented dlss5-neural.ini next to the exe; every value in it is a default.");
+    return true;
 }
 
 void LoadSettings()
@@ -6606,9 +6610,11 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
             Log("preview 2026-09-10: SDR input contract, serialized inline passes; Vulkan %d",
                 DLSS5_WITH_VULKAN);
             // Before the read, so a first run has a documented file to read and the user has
-            // something to edit without being told which keys exist.
-            EnsureNeuralIni();
-            LoadSettings();
+            // something to edit without being told which keys exist. On the run that writes it,
+            // it has already read the settings for the reason its own comment gives, and a second
+            // read here would only re-parse what it just wrote.
+            if (!EnsureNeuralIni())
+                LoadSettings();
         }
         // Kept even though it has never fired on D3D12: measured, PCSX2 on D3D12 delivers zero
         // depth-stencil binds in 600 frames, with or without also subscribing to the draw events.
