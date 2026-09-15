@@ -807,6 +807,9 @@ struct Guide
     // dereferenced, and cleared the moment it stops winning -- so no reference is needed.
     ID3D11Resource *challenger = nullptr;
     UINT challengerFrames = 0;
+    // Presents counted before the first guide is taken at all. Separate from the challenger
+    // streak because the cold start is a different question: see SettleGuide.
+    UINT coldFrames = 0;
     UINT width = 0, height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 
@@ -877,6 +880,68 @@ struct Tallied
 };
 std::unordered_map<void *, Tallied> g_depthTally, g_motionTally;
 
+// The same idea for D3D12 depth, which had none: it picked by size alone. Separate because these
+// are ID3D12Resource and because depth here is decided on clears as well as binds -- the buffer
+// the game clears every frame is the one it draws the scene into.
+// No guide buffer worth having is smaller than this. It exists because the relative floors below
+// are measured against a swapchain size that is zero until the effect has been switched on once --
+// a Darksiders 3 log has "guide motion: taking 1x1 format 16, bound 2928 times this frame", taken
+// in exactly that window, with CreateTexture2D failing on it the next line.
+constexpr UINT kGuideFloor = 256;
+
+struct D12Depth
+{
+    ComPtr<ID3D12Resource> res;
+    UINT binds = 0, clears = 0;
+    UINT width = 0, height = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+};
+std::unordered_map<void *, D12Depth> g_d12DepthTally;
+UINT g_d12DepthCold = 0;
+
+// One candidate's entry, created on first sight. Binds and clears both come through here, because
+// a clear is evidence in its own right: an engine is allowed to clear a buffer it has not bound
+// yet this present, and counting that only when the resource happened to be bound first left the
+// buffer the game clears every frame looking like one it never clears.
+D12Depth &TallyD12Depth(ID3D12Resource *native, const D3D12_RESOURCE_DESC &d)
+{
+    D12Depth &slot = g_d12DepthTally[native];
+    if (slot.res == nullptr)
+    {
+        slot.res = native;  // ComPtr: takes a reference
+        slot.width = static_cast<UINT>(d.Width);
+        slot.height = d.Height;
+        slot.format = d.Format;
+    }
+    return slot;
+}
+
+// Screen-shaped: the aspect within 3% of the swapchain's, and at least a ninth of its area.
+//
+// This is what "largest wins" was missing. A 2048x2048 R16 shadow map is larger than the scene
+// depth of a game rendering 1129x706 into a 1920x1200 swapchain, and it won every time. An
+// unknown swapchain size decides nothing rather than accepting everything, which is how a 1x1
+// buffer used to get through the floor before the raster was known.
+bool ScreenShaped(UINT64 w, UINT h, UINT screenW, UINT screenH)
+{
+    if (w < kGuideFloor || h < kGuideFloor)
+        return false;
+    // The swapchain size is only known once the effect has been enabled once, and the default is
+    // to start switched off. Rejecting everything until then would mean a fresh install never
+    // finds a guide at all, which is the very thing the observation code says it exists to avoid.
+    // The floor above is what keeps a 1x1 out; shape can only be judged once there is a shape to
+    // judge against.
+    if (screenW == 0 || screenH == 0)
+        return true;
+    const double aspect = static_cast<double>(w) / static_cast<double>(h);
+    const double screen = static_cast<double>(screenW) / static_cast<double>(screenH);
+    if (std::abs(aspect - screen) > 0.03 * screen)
+        return false;
+    return static_cast<double>(w) * static_cast<double>(h) >=
+           static_cast<double>(screenW) * static_cast<double>(screenH) / 9.0;
+}
+
+
 // Takes the frame's tallies and settles which resource each guide reads from. A guide that
 // changes resource mid-run drops its snapshot and views, which Ensure rebuilds -- the same
 // orphaned-view trap the depth path already paid for once.
@@ -900,6 +965,27 @@ void SettleGuide(Guide &guide, std::unordered_map<void *, Tallied> &tally)
         return;
     }
 
+    // Nothing chosen yet: add three presents up, then take the leader.
+    //
+    // The streak rule below exists to protect an incumbent, and with no incumbent there is
+    // nothing to protect -- only the question of having seen enough. Asking one candidate to win
+    // three presents *running* is a rule this case cannot always satisfy: an engine that rotates
+    // two or three depth targets never presents the same one three times in a row, so the
+    // challenger changed every present, the streak reset every present, and the guide was never
+    // taken at all. No depth, in a game that has depth, for as long as it runs. Measured against
+    // tools/guide_switch_check.py: a rotating pair leaves the slot empty after a hundred presents.
+    //
+    // So the tally is left standing rather than cleared, and three presents of binds add up
+    // before the leader is taken. Rotating targets each keep their own share and one of them
+    // wins; the scene pass still outbinds a shadow map by an order of magnitude; and a single odd
+    // frame still cannot decide it alone.
+    const bool cold = guide.chosen == nullptr;
+    if (cold)
+    {
+        if (++guide.coldFrames < 3)
+            return;  // deliberately NOT cleared -- leaving it standing is what accumulates
+        guide.coldFrames = 0;
+    }
     // A challenger has to win more than one frame.
     //
     // The tally is cleared every present, so "most-bound" was decided by a single frame, and a
@@ -912,14 +998,14 @@ void SettleGuide(Guide &guide, std::unordered_map<void *, Tallied> &tally)
     //
     // Three frames is enough to outlast a resolution change, a loading screen or an alt-tab, and
     // short enough that a real switch costs nothing anyone can see.
-    if (guide.challenger != best->res.Get())
+    else if (guide.challenger != best->res.Get())
     {
         guide.challenger = best->res.Get();
         guide.challengerFrames = 1;
         tally.clear();
         return;
     }
-    if (++guide.challengerFrames < 3)
+    else if (++guide.challengerFrames < 3)
     {
         tally.clear();
         return;
@@ -934,8 +1020,9 @@ void SettleGuide(Guide &guide, std::unordered_map<void *, Tallied> &tally)
     guide.ready = false;
     guide.logged = false;
     guide.failed = false;
-    Log("guide %s: taking %ux%u format %u, bound %u times a frame for three frames running",
-        guide.name, best->width, best->height, static_cast<unsigned>(best->format), best->binds);
+    Log("guide %s: taking %ux%u format %u, bound %u times %s", guide.name, best->width,
+        best->height, static_cast<unsigned>(best->format), best->binds,
+        cold ? "over the first three presents" : "a frame for three frames running");
     tally.clear();
 }
 
@@ -1274,6 +1361,14 @@ struct State
     uint64_t frame = 0;
     uint64_t skipped = 0;
     UINT64 lastJobAt = 0;
+    // A job that is running right now, and how the network's real cost is kept. A dispatch that
+    // takes seconds is not slow, it is a display-driver reset waiting to happen -- see
+    // NoteJobCost. scaleCap is 0 when the person's own Scale is being honoured in full.
+    bool jobRunning = false;
+    std::atomic<float> scaleCap { 0.0f };
+    std::atomic<UINT64> worstJobMs { 0 };
+    UINT longJobs = 0;
+    UINT junkProbes = 0;
     ComPtr<ID3D12Fence> fence;
     UINT64 serial = 0, completion = 0;
 
@@ -1288,6 +1383,11 @@ struct State
 };
 
 State g;
+
+// Defined further down, beside the raster code they belong to; used from both present paths,
+// which come first.
+float EffectiveScale();
+void NoteJobCost(UINT64 ms);
 
 // Whether this frame's composition carries something the network produced for THIS frame.
 //
@@ -1340,6 +1440,9 @@ int RuntimeTonemap()
 // Written only when the file is absent, so a personal tuning is never overwritten. The values
 // here are the same defaults the code carries; this file existing changes nothing about how the
 // add-on behaves.
+void LoadSettings();
+void SaveSettings(bool quiet = false);
+
 void EnsureNeuralIni()
 {
     const auto ini = ExeDirectory() / L"dlss5-neural.ini";
@@ -1388,8 +1491,26 @@ void EnsureNeuralIni()
          "Language=0\r\n"
          "\r\n"
          "; --- everything else ---------------------------------------------------------\r\n"
-         "; The overlay carries the rest and explains each one where it sits. Change things\r\n"
-         "; there, press Save, and they appear in this file.\r\n";
+         "; Everything else the overlay carries follows, each at its default, so this file on\r\n"
+         "; its own is enough to tune the add-on with the overlay never opened -- which is what\r\n"
+         "; a game running under Lossless Scaling or Magpie needs, because there the overlay\r\n"
+         "; sits behind somebody else's picture. The overlay explains each one where it sits.\r\n"
+         "; Intensity leads because it is the one people reach for: the weight of the whole\r\n"
+         "; effect, 1 being the network at full strength.\r\n"
+         "Intensity=1\r\n";
+    f.close();
+
+    // The rest of the keys, through the same writer the overlay's Save uses, so a file written
+    // here and a file written by Save carry exactly the same set -- an edit made without the
+    // overlay cannot need a key that only exists once somebody has pressed a button.
+    //
+    // LoadSettings first, and not because anything needs reading: the default that belongs in the
+    // file is the one LoadSettings applies when a key is absent, and for a dozen of them that is a
+    // literal in the reader rather than g's constructed value (Passes, Encoding, Tonemap and the
+    // rest). Reading the eight keys above and letting every other fallback land in g is what makes
+    // the written file describe the run it is about to have instead of a slightly different one.
+    LoadSettings();
+    SaveSettings(/*quiet=*/true);
     Log("wrote a commented dlss5-neural.ini next to the exe; every value in it is a default.");
 }
 
@@ -1519,7 +1640,7 @@ void LoadSettings()
 // the matching Win32 writer, and the numbers are formatted in the C locale for the same reason
 // the reader parses in it -- a pt-BR install would otherwise write "0,50", which the reader then
 // stops at the comma.
-void SaveSettings()
+void SaveSettings(bool quiet)
 {
     const auto ini = (ExeDirectory() / L"dlss5-neural.ini").wstring();
     auto num = [&](const wchar_t *key, double v) {
@@ -1588,7 +1709,9 @@ void SaveSettings()
     // Stage / Events / NoBridge / NoBackBuffer are deliberately not written back. They are
     // startup diagnostics, they cannot take effect live, and rewriting them here would quietly
     // re-save a one-off value that was meant for a single run.
-    Log("settings saved to dlss5-neural.ini");
+    // Quiet while the first-run file is being filled in: that line is the only proof anyone has
+    // that the overlay's Save reached the disk, so it has to keep meaning only that.
+    if (!quiet) Log("settings saved to dlss5-neural.ini");
 }
 
 // Our own D3D12 device on the adapter the game is already using, so shared textures and fences
@@ -1774,28 +1897,49 @@ void DrainReadbacks(UINT nw, UINT nh)
             if (SUCCEEDED(g.guideReadDepth->Map(0, &all, &a)) &&
                 SUCCEEDED(g.guideReadMotion->Map(0, &all, &b)))
             {
+                // Counted over samples that are actually depth. A depth buffer read correctly
+                // is in 0..1 everywhere; the numbers that arrive when the read is wrong are
+                // 1e38, -3e38 and NaN, and "min is not max" called every one of those a real
+                // depth buffer. NaN fails both comparisons below, so it lands outside the range
+                // on its own and never reaches the mean.
                 double lo = 1e30, hi = -1e30, sum = 0.0;
+                UINT64 inRange = 0;
+                const UINT64 samples = static_cast<UINT64>(nw) * nh;
                 for (UINT y = 0; y < nh; ++y)
                 {
                     auto *row = reinterpret_cast<const float *>(static_cast<const char *>(a) +
                                                                 static_cast<size_t>(y) * pitch);
                     for (UINT x = 0; x < nw; ++x)
                     {
-                        lo = std::min<double>(lo, row[x]);
-                        hi = std::max<double>(hi, row[x]);
-                        sum += row[x];
+                        const float v = row[x];
+                        if (!(v >= 0.0f && v <= 1.0f))
+                            continue;
+                        lo = std::min<double>(lo, v);
+                        hi = std::max<double>(hi, v);
+                        sum += v;
+                        ++inRange;
                     }
                 }
-                const bool depthReal = (hi - lo) > 1e-6;
+                const double inPct = samples == 0 ? 0.0 : 100.0 * static_cast<double>(inRange) /
+                                                              static_cast<double>(samples);
+                const bool depthJunk = inPct < 90.0;
+                const bool depthReal = !depthJunk && inRange > 0 && (hi - lo) > 1e-6;
+                if (inRange == 0)
+                    lo = hi = 0.0;
                 g.probeDepthMin.store(static_cast<float>(lo));
                 g.probeDepthMax.store(static_cast<float>(hi));
-                if (hi > 1e-6)
+                // Only from a reading that is actually depth: under JUNK, hi is the maximum of
+                // whatever few samples happened to land in 0..1, which is noise.
+                if (!depthJunk && hi > 1e-6)
                     g.depthDebugScale.store(static_cast<float>(1.0 / hi));
-                Log("guide probe, depth %ux%u: min %.6f max %.6f mean %.6f%s", nw, nh, lo, hi,
-                    sum / (nw * nh),
-                    !depthReal ? "  <-- FLAT. A constant, so either this is a menu with no scene "
-                                 "or the guide picked the wrong resource."
-                               : "  <-- varies, so this is a real depth buffer.");
+                Log("guide probe, depth %ux%u: min %.6f max %.6f mean %.6f, %.1f%% in 0..1%s", nw,
+                    nh, lo, hi, inRange == 0 ? 0.0 : sum / static_cast<double>(inRange), inPct,
+                    depthJunk ? "  <-- JUNK. Most of this is not in 0..1, so it is not being read "
+                                "as depth: wrong resource, or a copy between two layouts that do "
+                                "not match. The network is better off without it."
+                    : !depthReal ? "  <-- FLAT. A constant, so either this is a menu with no scene "
+                                   "or the guide picked the wrong resource."
+                                 : "  <-- varies, so this is a real depth buffer.");
 
                 UINT64 zero = 0, n = 0;
                 double mag = 0.0, biggest = 0.0;
@@ -1823,12 +1967,27 @@ void DrainReadbacks(UINT nw, UINT nh)
                                 "buffer the engine does not write velocity into."
                               : "");
                 // Once a real scene has been seen there is nothing left to answer; until then
-                // keep looking, because the first few hundred frames are menus and loading.
+                // keep looking, because the first few hundred frames are menus and loading -- and
+                // because junk must never end the search. It used to: the first probe fired on
+                // depth that was 1e38 and motion that was uninitialised, both passed, and the
+                // add-on stopped asking for the rest of the run.
                 if (depthReal && zero < n)
                 {
                     g.guidesLookReal.store(true);
                     g.probeGuides.store(false);
                     Log("guide probe: both guides carry real data. Not probing again.");
+                }
+                else if (++g.junkProbes >= 5)
+                {
+                    // Junk used to end the search, which was the bug. Never ending it is the
+                    // other one: each probe allocates two readback buffers and spins on a fence
+                    // on the present thread, and in a game whose depth reads as junk that is the
+                    // one thing guaranteed to keep happening. Five is enough to outlast menus
+                    // and loading screens; past that the answer is not going to change.
+                    g.probeGuides.store(false);
+                    Log("guide probe: five readings and the guides still do not carry usable "
+                        "data. Not probing again -- the lines above say what was wrong with "
+                        "each one.");
                 }
                 g.guideReadDepth->Unmap(0, nullptr);
                 g.guideReadMotion->Unmap(0, nullptr);
@@ -2133,8 +2292,32 @@ bool PrepareGuide(Guide &guide, bool isDepth)
         td.Format = guide.format;
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(g.game11->CreateTexture2D(&td, nullptr, &guide.snap)))
+        // BIND_DEPTH_STENCIL as well, for a depth format, so this is the same kind of resource as
+        // the one about to be copied into it. A depth-stencil surface is planar and compressed;
+        // the same typeless format without the flag is neither, and CopyResource between the two
+        // is a copy across layouts. The D3D12 half of this add-on made exactly this mistake with
+        // its pre-clear snapshot and every probe of the result came back min -3e38, max 2e36,
+        // mean NaN -- garbage that was then handed to the network as depth. This is that same
+        // copy, on the D3D11 bridge, and Darksiders 3 takes it: R24G8_TYPELESS at 2560x1440.
+        //
+        // Kept to depth formats: a motion guide is an ordinary two-channel colour target and the
+        // flag would only make its creation fail.
+        const bool isDepth = GuideDepthSrvFormat(guide.format) != DXGI_FORMAT_UNKNOWN;
+        td.BindFlags = isDepth ? (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL)
+                               : D3D11_BIND_SHADER_RESOURCE;
+        HRESULT made = g.game11->CreateTexture2D(&td, nullptr, &guide.snap);
+        if (FAILED(made) && isDepth)
+        {
+            // Some formats reach here that no driver will give a depth-stencil view of. Falling
+            // back leaves the old behaviour rather than losing the guide outright, and says so,
+            // because a copy on this path is then the suspect for anything odd downstream.
+            Log("guide depth: %ux%u format %u was refused as a depth-stencil copy (0x%08lX); "
+                "falling back to a plain shader-resource copy, which may not read correctly.",
+                w, h, static_cast<unsigned>(guide.format), static_cast<unsigned long>(made));
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            made = g.game11->CreateTexture2D(&td, nullptr, &guide.snap);
+        }
+        if (FAILED(made))
         {
             guide.failed = true;
             Log("guide depth: private %ux%u copy of format %u could not be created.", w, h,
@@ -2436,7 +2619,7 @@ void BridgePresent(device *dev, swapchain *sc)
     const auto fmt = static_cast<DXGI_FORMAT>(bd.texture.format);
     const UINT w = bd.texture.width, h = bd.texture.height;
 
-    if (!EnsureResources(w, h, fmt, g.scale.load()))
+    if (!EnsureResources(w, h, fmt, EffectiveScale()))
     {
         g.unavailable = true;
         if (*g.reason == 0)
@@ -2478,6 +2661,11 @@ void BridgePresent(device *dev, swapchain *sc)
         static_cast<UINT>(InterlockedCompareExchange(
             reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x8d6f4)), 0, 0)) <
             g.lastJob;
+    if (!jobPending && g.jobRunning)
+    {
+        g.jobRunning = false;
+        NoteJobCost(GetTickCount64() - g.lastJobAt);
+    }
     if (jobPending && GetTickCount64() - g.lastJobAt < 500)
     {
         runNetwork = false;
@@ -3236,6 +3424,64 @@ bool EnsureResources(UINT w, UINT h, DXGI_FORMAT outFormat, float scale)
     return true;
 }
 
+// What the network is actually run at: the person's Scale, held down when this card has already
+// shown it cannot carry it.
+//
+// The engine's inline mode makes the game's own queue wait for the network, and the watchdog this
+// add-on writes into dlssnr_on_amd.ini (InlineWaitMs=100) only stops the CPU from waiting -- it
+// cannot cancel a dispatch already on the GPU. A Conan Exiles log from an RX 9070 has jobs of
+// 277 ms and then 2711 ms at 1920x1080, which is Windows TDR territory: the driver resets, the
+// device is removed, and the game goes with it. The person reporting it had the game and then the
+// whole PC go down, and found by hand that 0.50 was the setting that survived.
+//
+// So the cost is measured and the scale is held one step below whatever produced it. Their own
+// setting is never overwritten -- the cap is separate, and the overlay says it is in force.
+float EffectiveScale()
+{
+    const float wanted = g.scale.load(), cap = g.scaleCap.load();
+    return cap > 0.0f && cap < wanted ? cap : wanted;
+}
+
+// One finished evaluation, timed from this side rather than read out of the engine's log. Three
+// dangerous jobs and the scale comes down a step: one is a shader compile or an alt-tab, three is
+// this card at this resolution.
+void NoteJobCost(UINT64 ms)
+{
+    constexpr UINT64 kDanger = 250;  // an order of magnitude past a frame, far short of TDR
+    // A reading this large is not a job. The GPU cannot hold one for half a minute -- Windows
+    // resets the driver long before -- so it is a pause that slipped past the latch: the effect
+    // switched off and on, a window restored on a path that does not clear it. Counting it would
+    // cap the scale for something that never ran.
+    if (ms > 30000)
+        return;
+    if (ms > g.worstJobMs.load())
+        g.worstJobMs.store(ms);
+    if (ms < kDanger)
+    {
+        if (ms < kDanger / 2)
+            g.longJobs = 0;  // comfortably back inside budget: the streak was a hitch
+        return;
+    }
+    if (++g.longJobs < 3)
+        return;
+    g.longJobs = 0;
+
+    const float now = EffectiveScale();
+    const float next = std::max(0.25f, now - 0.25f);
+    if (next >= now)
+    {
+        Log("the network took %llu ms at scale %.2f, which is already the lowest. This card "
+            "cannot carry this resolution; turn the effect off rather than risk the driver.",
+            static_cast<unsigned long long>(ms), static_cast<double>(now));
+        return;
+    }
+    g.scaleCap.store(next);
+    Log("the network took %llu ms three times at scale %.2f. A dispatch that long resets the "
+        "display driver and takes the game with it, so the scale is held at %.2f. Your own Scale "
+        "setting is untouched; raise the cap by setting Scale again in the overlay.",
+        static_cast<unsigned long long>(ms), static_cast<double>(now), static_cast<double>(next));
+}
+
 // Observation is deliberately NOT gated on the Depth switch. It used to be, and that made the
 // question unanswerable: with the switch off -- the default -- this returned immediately, logged
 // nothing, and the status line then said "no candidate found", which reads as "this game has no
@@ -3251,7 +3497,14 @@ bool LooksLikeMotion(const D3D11_TEXTURE2D_DESC &d, UINT screenW, UINT screenH)
     if (d.Format != DXGI_FORMAT_R16G16_FLOAT && d.Format != DXGI_FORMAT_R32G32_FLOAT &&
         d.Format != DXGI_FORMAT_R16G16_SNORM)
         return false;
-    return screenW == 0 || (d.Width * 2 >= screenW && d.Height * 2 >= screenH);
+    // An absolute floor first, because the relative one below is measured against a swapchain
+    // size that is zero until the effect has been enabled once -- and "anything passes while the
+    // size is unknown" is how a 1x1 buffer became the motion guide.
+    if (d.Width < kGuideFloor || d.Height < kGuideFloor)
+        return false;
+    if (screenW == 0 || screenH == 0)
+        return true;
+    return d.Width * 2 >= screenW && d.Height * 2 >= screenH;
 }
 
 // D3D11 half of the observation. ReShade hands the render targets and the depth-stencil of
@@ -3283,9 +3536,12 @@ void ObserveD3D11(device *dev, const resource_view *rtvs, uint32_t count, resour
         if (SUCCEEDED(native->QueryInterface(IID_PPV_ARGS(&tex))))
         {
             tex->GetDesc(&d);
+            // Same two floors, for the same reason.
             if (d.SampleDesc.Count == 1 && d.ArraySize == 1 &&
+                d.Width >= kGuideFloor && d.Height >= kGuideFloor &&
                 GuideDepthSrvFormat(d.Format) != DXGI_FORMAT_UNKNOWN &&
-                (screenW == 0 || (d.Width * 2 >= screenW && d.Height * 2 >= screenH)))
+                (screenW == 0 || screenH == 0 ||
+                 (d.Width * 2 >= screenW && d.Height * 2 >= screenH)))
                 record(g_depthTally, native, d);
         }
     }
@@ -3355,10 +3611,7 @@ void OnBindDepthStencil(command_list *cmd_list, uint32_t count, const resource_v
     auto *native = reinterpret_cast<ID3D12Resource *>(res.handle);
     std::lock_guard guard(g.lock);
     if (native == g.depthBest.Get())
-    {
-        ++g.depthBinds;
-        return;
-    }
+        ++g.depthBinds;  // the status line's running total, which outlives one present
     const auto d = native->GetDesc();
     static UINT seen = 0;  // separate from the API-agnostic counter above
     const bool readable = DepthReadFormat(d.Format) != DXGI_FORMAT_UNKNOWN;
@@ -3374,14 +3627,9 @@ void OnBindDepthStencil(command_list *cmd_list, uint32_t count, const resource_v
     if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d.SampleDesc.Count != 1 ||
         d.DepthOrArraySize != 1 || !readable || denied)
         return;
-    if (g.depthBest == nullptr || d.Width * d.Height > static_cast<UINT64>(g.depthWidth) * g.depthHeight)
-    {
-        g.depthBest = native;  // ComPtr: takes a reference
-        g.depthWidth = static_cast<UINT>(d.Width);
-        g.depthHeight = d.Height;
-        g.depthFormat = d.Format;
-        g.depthBinds = 1;
-    }
+    if (!ScreenShaped(d.Width, d.Height, g.outWidth, g.outHeight))
+        return;
+    ++TallyD12Depth(native, d).binds;
 }
 
 // Subscribing to the draw events is what makes ReShade track render-target state on the game's
@@ -3409,6 +3657,19 @@ bool OnClearDepth(command_list *cmd_list, resource_view dsv, const float *, cons
     auto *native = reinterpret_cast<ID3D12Resource *>(res.handle);
 
     std::lock_guard guard(g.lock);
+    // Counted for whichever candidate this is, not only for the one holding the slot: "the game
+    // clears it every frame" is how the scene depth is told from a buffer that is merely the same
+    // size, and that has to be known about a challenger before it can win. Recorded rather than
+    // looked up, so a clear that comes before this present's first bind still counts.
+    {
+        const auto cd = native->GetDesc();
+        if (ScreenShaped(cd.Width, cd.Height, g.outWidth, g.outHeight) &&
+            DepthReadFormat(cd.Format) != DXGI_FORMAT_UNKNOWN &&
+            (cd.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) == 0 &&
+            cd.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && cd.SampleDesc.Count == 1 &&
+            cd.DepthOrArraySize == 1)
+            ++TallyD12Depth(native, cd).clears;
+    }
     if (!g.useDepth.load() || native != g.depthBest.Get() || g.device == nullptr)
         return false;
     ++g.depthClears;
@@ -3420,7 +3681,13 @@ bool OnClearDepth(command_list *cmd_list, resource_view dsv, const float *, cons
         g.depthSnapshot.Reset();
         auto sd = d;
         sd.Format = DepthAliasFormat(d.Format);
-        sd.Flags = D3D12_RESOURCE_FLAG_NONE;
+        // ALLOW_DEPTH_STENCIL, and not NONE, for the same reason the live-buffer alias path uses
+        // it. R32G8X24_TYPELESS without the flag is a plain one-plane 64-bit texture; the game's
+        // depth-stencil resource is planar. CopyResource between those two layouts is not a valid
+        // copy, and D3D12 does not refuse it -- it just produces garbage. Every probe read on the
+        // result came back min -3e38, max 2e36, mean NaN, which then sailed through the "min is
+        // not max, so it is real depth" check below and was handed to the network as depth.
+        sd.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
         sd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
         if (sd.Format == DXGI_FORMAT_UNKNOWN)
             return false;
@@ -3519,9 +3786,12 @@ void ReleaseSwapchainSized()
         // next allocation the game makes can land on the same address.
         guide->challenger = nullptr;
         guide->challengerFrames = 0;
+        guide->coldFrames = 0;
     }
     g_depthTally.clear();
     g_motionTally.clear();
+    g_d12DepthTally.clear();
+    g_d12DepthCold = 0;
     // depthBest now holds a reference of its own, so it has to be let go here as well as
     // remembered. Holding a reference on a resource the game owns across its own teardown is
     // the same shape as the bug that broke this add-on's swapchain resize once already: the
@@ -4332,7 +4602,10 @@ bool RecordNetwork(ID3D12GraphicsCommandList *&cmd, ID3D12Resource *colourSrc,
             "per-pass job ids above are what tells those two apart.", wanted, accepted);
     }
     if (accepted != 0)
+    {
         g.lastJobAt = GetTickCount64();
+        g.jobRunning = true;
+    }
     if (nativeFailure)
         return false;
 
@@ -4477,11 +4750,86 @@ bool BringUpEngines(UINT &)
 #include "vk_route.inc"
 #endif
 
+// Which D3D12 buffer is the scene depth, decided once per present.
+//
+// Three things went wrong with "largest wins", all measured on Cyberpunk 2077 at 1129x706 into a
+// 1920x1200 swapchain: it took a 2048x2048 shadow map; with a shape filter added it took a
+// 1920x1200 buffer the game drew into 7 times a frame over the scene depth it drew into ~2,400
+// times; and when two buffers were the same size it settled on the one the game never clears, so
+// the pre-clear snapshot froze on a stale frame.
+//
+// So: count binds, count clears, and when anything screen-shaped was cleared this present, only
+// cleared buffers are eligible. A challenger needs a clear margin over the incumbent, and with no
+// incumbent three presents are added up first -- the same rule, and the same reason, as
+// SettleGuide. Caller holds g.lock.
+void SettleD3D12Depth()
+{
+    bool anyCleared = false;
+    for (const auto &entry : g_d12DepthTally)
+        if (entry.second.clears > 0)
+        {
+            anyCleared = true;
+            break;
+        }
+
+    const D12Depth *best = nullptr;
+    for (const auto &entry : g_d12DepthTally)
+    {
+        if (anyCleared && entry.second.clears == 0)
+            continue;
+        if (best == nullptr || entry.second.binds > best->binds)
+            best = &entry.second;
+    }
+    if (best == nullptr)
+    {
+        g_d12DepthTally.clear();
+        return;
+    }
+
+    if (best->res.Get() == g.depthBest.Get())
+    {
+        g.depthBestBinds = best->binds;
+        g_d12DepthCold = 0;
+        g_d12DepthTally.clear();
+        return;
+    }
+    if (g.depthBest == nullptr)
+    {
+        if (++g_d12DepthCold < 3)
+            return;  // deliberately not cleared: three presents of binds add up
+        g_d12DepthCold = 0;
+    }
+    else if (best->binds <= g.depthBestBinds + g.depthBestBinds / 4)
+    {
+        g_d12DepthTally.clear();  // no margin, so the incumbent keeps the slot
+        return;
+    }
+
+    g.depthBest = best->res;
+    g.depthWidth = best->width;
+    g.depthHeight = best->height;
+    g.depthFormat = best->format;
+    g.depthBinds = g.depthBestBinds = best->binds;
+    // The snapshot is deliberately NOT released here. A dispatch recorded into the game's command
+    // list still reads it, and D3D12 does not keep a resource alive because an in-flight list
+    // references it -- the rule EnsureResources spells out, and it waits for the queue before it
+    // drops anything. This runs at the top of present with no such wait, and the whole reason the
+    // job bookkeeping exists is that a job routinely spans several presents. Nothing needs to be
+    // freed anyway: the next clear of the new buffer copies over it, and OnClearDepth rebuilds it
+    // when the size or format actually changes.
+    Log("depth (D3D12): taking %ux%u format %d, bound %u times a present and cleared %u",
+        best->width, best->height, static_cast<int>(best->format), best->binds, best->clears);
+    g_d12DepthTally.clear();
+}
+
 void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, uint32_t,
                const rect *)
 {
     const Profile &profile = ProfileForThisProcess();
     std::lock_guard guard(g.lock);
+    // Which buffer is the scene depth is decided here, once a present, on a whole frame's worth
+    // of binds and clears. On D3D11 the equivalent is SettleGuide, a few lines into the bridge.
+    SettleD3D12Depth();
     // Opt-in diagnostic controls, only on the foreground game's swapchain.
     // No per-frame file polling and no UI interaction needed for matched captures.
     if (g.diagnostics)
@@ -4570,6 +4918,11 @@ void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, 
         // a temporal denoiser is asking it to smear a stale frame across the new one, which is
         // the ghosting people see for a second or two after alt-tabbing back. Start clean.
         g.historyValid.store(false);
+        // And the job clock with it. jobRunning is a latch: set when a job is submitted, read on
+        // the next present that finds the job finished. Across a pause -- minimised, disabled,
+        // alt-tabbed -- no present runs, so the next one measures the whole pause and calls it a
+        // network job. Three of those and the scale would be capped for having been alt-tabbed.
+        g.jobRunning = false;
         Log("window restored; dropping the temporal history so nothing from before the alt-tab "
             "is carried into the new frame.");
     }
@@ -4708,7 +5061,7 @@ void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, 
     if (bd.SampleDesc.Count != 1 || bd.DepthOrArraySize != 1 ||
         bd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
         return;
-    if (!EnsureResources(static_cast<UINT>(bd.Width), bd.Height, bd.Format, g.scale.load()))
+    if (!EnsureResources(static_cast<UINT>(bd.Width), bd.Height, bd.Format, EffectiveScale()))
     {
         g.unavailable = true;
         if (*g.reason == '\0')
@@ -4730,6 +5083,11 @@ void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, 
         static_cast<UINT>(InterlockedCompareExchange(
             reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x8d6f4)), 0, 0)) <
             g.lastJob;
+    if (!jobPending && g.jobRunning)
+    {
+        g.jobRunning = false;
+        NoteJobCost(GetTickCount64() - g.lastJobAt);
+    }
     if (jobPending)
     {
         if (GetTickCount64() - g.lastJobAt < 500)
@@ -5337,16 +5695,43 @@ void OnOverlay(effect_runtime *runtime)
         if (ImGui::IsItemDeactivated())
         {
             const float before = g.scale.load();
-            if (editingScaleActive && editingScale != before)
+            if (editingScaleActive)
             {
-                g.scale.store(editingScale);
-                g.historyValid.store(false);
-                Log("menu: resolution scale %.2f -> %.2f; applying once after the edit ended",
-                    static_cast<double>(before), static_cast<double>(editingScale));
+                // Letting go of the slider is the person overruling a cap NoteJobCost put on,
+                // even when they let go on the number they started from -- which is exactly what
+                // somebody capped at 0.75 does when their Scale already says 1.00, and the
+                // overlay tells them to move the slider to ask again. If this card still cannot
+                // carry it, three long jobs put the cap back.
+                const float cap = g.scaleCap.exchange(0.0f);
+                g.longJobs = 0;
+                if (editingScale != before)
+                {
+                    g.scale.store(editingScale);
+                    g.historyValid.store(false);
+                    Log("menu: resolution scale %.2f -> %.2f; applying once after the edit ended%s",
+                        static_cast<double>(before), static_cast<double>(editingScale),
+                        cap > 0.0f ? " (the automatic cap is lifted)" : "");
+                }
+                else if (cap > 0.0f)
+                {
+                    Log("menu: resolution scale left at %.2f; the automatic cap is lifted and it "
+                        "runs at that until the network is measured too slow for it again.",
+                        static_cast<double>(before));
+                }
             }
             editingScaleActive = false;
         }
         v = editingScale;
+        if (const float cap = g.scaleCap.load(); cap > 0.0f && cap < g.scale.load())
+            ImGui::TextColored(ImVec4(0.93f, 0.72f, 0.36f, 1.0f),
+                T("Held at %.2f, this card's limit here. One network run took %llu ms at the scale "
+                  "above -- long enough to reset the display driver and take the game with it -- "
+                  "so it is running lower. Let go of the slider to ask for it again.",
+                  "Segurado em %.2f, o limite desta placa aqui. Uma passada da rede levou %llu ms "
+                  "na escala acima -- o bastante para resetar o driver de video e levar o jogo "
+                  "junto -- entao esta rodando mais baixo. Solte o slider para pedir de novo."),
+                static_cast<double>(cap),
+                static_cast<unsigned long long>(g.worstJobMs.load()));
         Help("Network width and height relative to the game frame. 0.50 uses a quarter of the pixels; "
              "1.00 uses the full frame. Lower scales reduce fine detail and inference cost. "
              "Materials can still change below 1.00. Measure frame time at the chosen resolution.",
@@ -5356,8 +5741,12 @@ void OnOverlay(effect_runtime *runtime)
         Tag(kMeasured);
         if (g.outWidth != 0)
         {
-            const UINT wantW = std::max<UINT>(64u, static_cast<UINT>(g.outWidth * v + 0.5f));
-            const UINT wantH = std::max<UINT>(64u, static_cast<UINT>(g.outHeight * v + 0.5f));
+            // Against what is actually being run at, not what the slider says: under a cap those
+            // two disagree by design, and comparing with the slider reported the raster as "not
+            // applied yet" for ever while it was working exactly as intended.
+            const float running = EffectiveScale();
+            const UINT wantW = std::max<UINT>(64u, static_cast<UINT>(g.outWidth * running + 0.5f));
+            const UINT wantH = std::max<UINT>(64u, static_cast<UINT>(g.outHeight * running + 0.5f));
             ImGui::Text(T("Network raster: %ux%u", "Raster da rede: %ux%u"), g.netWidth, g.netHeight);
             if (wantW != g.netWidth || wantH != g.netHeight)
             {
