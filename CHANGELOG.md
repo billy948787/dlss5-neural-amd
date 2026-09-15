@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.5.1 - 2026-09-15 - The hotkey, depth, and not taking the driver down
+
+- Fix the toggle hotkey rebind, which could not work for three reasons at once: ReShade answers 0
+  for every key through `GetAsyncKeyState` while its overlay holds the keyboard, the captured key
+  was written to a copy nothing else reads, and a capture armed on the click frame took the click's
+  own key. Capture now reads `effect_runtime::is_key_down`, waits for release, and writes through
+  the shadow the panel and the host both read.
+- Strip a UTF-8 byte-order mark from `dlss5-neural.ini` at load. `GetPrivateProfileInt` reads the
+  file as bytes, so a BOM hides the whole file and every setting silently falls back to its default.
+- Carry an `X8R8G8B8` back buffer as its `A8` twin on the D3D9 CPU route. `B8G8R8X8_UNORM` has no
+  typed UAV store on this hardware, so there was no way to write the corrected image back and the
+  add-on stopped on every frame from the first.
+- Fill the depth guide from three presents of binds when nothing is chosen yet, instead of asking
+  one candidate to win three presents running. An engine that rotates two or three depth targets
+  never does, so the slot stayed empty for the whole run.
+- Rewrite the D3D12 depth pick: tally binds and clears per present, only consider buffers shaped
+  like the swapchain, and prefer the ones the game clears. It used to take the largest, which is
+  a shadow map.
+- Create the depth snapshot with `ALLOW_DEPTH_STENCIL`, on both the D3D12 and the D3D11 paths. A
+  depth-stencil surface is planar; the same format without the flag is not, and the copy between
+  them returns garbage that D3D12 does not refuse.
+- Judge the depth probe on how much of the reading is in 0..1 rather than on the minimum differing
+  from the maximum, which `min 0, max 4.4e30, mean NaN` passes. Junk no longer ends the search, and
+  no longer keeps it going for ever either.
+- Hold the resolution scale one step lower after three network evaluations over 250 ms. In inline
+  mode the game's queue waits for the network, and a multi-second dispatch is a Windows TDR: the
+  driver resets and takes the game with it. The person's own Scale setting is untouched.
+- Refuse a guide buffer below 256 pixels on a side. With the swapchain size still unknown every
+  buffer passed the floor, including a 1x1 that was taken as the motion guide.
+- Write every setting into `dlss5-neural.ini` on the first run, at its default, so the add-on can
+  be tuned from the file alone with the overlay never opened.
+- Retire the Rust terminal installer. Installing is AMD-NR ReShade Installer, which finds games,
+  fetches and verifies the payloads, installs ReShade, and keeps a manifest of what it wrote.
+
 ## v0.5.0 — 2026-09-14 — The 32-bit bridge, D3D8, and one installer
 
 - Add native 32-bit D3D9 and D3D11 ReShade frontends and a separate 64-bit host that reuses the

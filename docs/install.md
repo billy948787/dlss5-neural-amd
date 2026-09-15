@@ -1,8 +1,13 @@
-# Installing
+# Installing, by hand
 
-One installer, both architectures. It reads the game's executable to work out whether it is 32- or
-64-bit and offers only the presets that can work for it, so most of what follows is the same
-whichever you have.
+**Most people should not read this file.** Use **AMD-NR ReShade Installer**, from the Releases page:
+it finds the games, works out which renderer each one uses, downloads and verifies the runtime and
+the weights, installs ReShade and the add-on, and can take it all back out. There is a video of the
+whole thing: <https://www.youtube.com/watch?v=L2v0b98wReQ>
+
+What follows is the same install done by hand, for a machine that cannot run the installer, for
+somebody who would rather not, and because it is the whole truth about what an install is. The
+files are the same, the folder is the same, and the hashes are the same.
 
 ## What you need first
 
@@ -14,26 +19,35 @@ support*; the ordinary one cannot load add-ons at all.
 refuses any other build, including newer ones, because that is the version the bridge was tested
 against.
 
-**The runtime and the weights** — `dlssnr_amd_pass1.dll` and `dlssnr_on_amd_weights.bin` — from the
-`files` channel on the [Discord](https://discord.gg/wYhvS3JSHM). They are not distributed here: the
-weights are NVIDIA-derived and the runtime is a third-party build. Put both in the `files` folder
-that came out of this archive.
+**The runtime and the weights** — `dlssnr_amd_pass1.dll` and `dlssnr_on_amd_weights.bin`. The
+installer fetches these for you; by hand they are on the `files` channel of the
+[Discord](https://discord.gg/wYhvS3JSHM). They are not in this repository: the weights are
+NVIDIA-derived and the runtime is a third-party build with its own terms.
+
+Check them against `tools/SHA256SUMS.txt` before using them. The add-on hashes the runtime at load
+and refuses anything that is not the exact build it was written against, because every offset in it
+is a hardcoded address into that one binary.
 
 ## Installing
 
-1. Unzip this archive anywhere.
-2. Drop `dlssnr_amd_pass1.dll` and `dlssnr_on_amd_weights.bin` into its `files` folder.
-3. Run `dlss5-installer.exe`.
-4. **Field 1** is this unzipped folder.
-5. **Field 2** is the game. A folder works; the game's `.exe` works and is better, because the
-   installer reads its header. For a 32-bit game it wants the executable.
-6. Pick the target on the row at the top. Only the presets that fit the detected width are shown.
-7. Press **F5**. **F8** uninstalls.
+Everything goes in **the folder the game renders from**, which is not always the folder the game
+sits in: Source keeps it in `bin\`, Unreal in `Binaries\Win64\`. It is the folder ReShade landed
+in — the one holding the proxy DLL you just installed.
 
-The panel above the buttons says what would stop the install before you press anything: the game
-still running and holding a file, a folder needing administrator rights, no room for the weights,
-ReShade missing or installed twice. The first of those are refusals rather than warnings — nothing
-is written at all until they pass, so a failed install cannot leave half of one behind.
+1. Unzip this archive anywhere.
+2. Copy `dlss5-neural.addon64` into that folder. That is the whole of a 64-bit install.
+3. Copy `dlssnr_amd_pass1.dll` and `dlssnr_on_amd_weights.bin` in beside it.
+4. **For a 32-bit game**, copy `files\dlss5-neural.addon32`, `files\dlss5-neural-host64.exe` and
+   `payload.sha256` in as well. The `.addon32` is what ReShade loads; the `.exe` is the 64-bit
+   helper it starts, and it has to be beside it.
+
+Two things that are not files, and are the two ways a by-hand install goes wrong:
+
+- **`DisabledAddons=` in `ReShade.ini`.** ReShade writes that line the first time an add-on is
+  unticked, and from then on it never loads it again and says nothing anywhere. If the add-on does
+  not appear in the overlay, look there first.
+- **The renderer the game is actually set to.** Copying files cannot change it. A game on D3D12
+  with the D3D11 files installed runs perfectly and does nothing.
 
 ## What it does to the game folder
 
@@ -51,10 +65,19 @@ installer follows it. That is what puts the files in `bin` for Source-engine gam
 It starts switched off. Open the ReShade overlay with **Home**, find **DLSS Neural Rendering (AMD)**,
 and enable it — or press **Ctrl+End**. `StartOn=1` in `dlss5-neural.ini` makes it come up enabled.
 
+## Taking it back out
+
+By hand there is no manifest, so it is the files: delete `dlss5-neural.addon64` (or the
+`.addon32` and `dlss5-neural-host64.exe` pair), `dlssnr_amd_pass1.dll`,
+`dlssnr_on_amd_weights.bin`, `dlss5-pass1.dll` and the `dlss5-runtime\` folder. ReShade itself is
+its own installer's business. `dlss5-neural.ini` is your tuning — delete it only if you want the
+defaults back.
+
 ## If something goes wrong
 
-The installer writes `dlss5-installer.log` beside itself on failure and prints the path. Everything
-it saw is in that file.
+Two logs, both in the folder the add-on loaded from: `dlss5-neural.log` is the add-on — what it
+detected, the back buffer size and format, and the residual measurement — and `dlssnr_on_amd.log`
+is the runtime, with staging formats, per-job timings and faults.
 
 For a 32-bit game, the add-on and its helper write `dlss5-neural-x86.log` and
 `dlss5-neural-x86-host.log` in the folder the add-on actually loaded from — which is `bin` on

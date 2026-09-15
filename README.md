@@ -2,50 +2,86 @@
 
 **THIS IS A PROOF-OF-CONCEPT, NOT EVEN CLOSE TO FINAL VERSION, FORK IT, SHARE IT, LETS GROW TOGETHER**
 
-## v0.5.0
+## v0.5.1
 
-**32-bit games work now.** A 32-bit game cannot load the 64-bit runtime at all, so the add-on runs
-as a pair instead: a 32-bit frontend inside the game and a 64-bit helper beside it, sharing frames
-on the same adapter and handing the finished frame back in the same frame. D3D11, D3D9 and — through
-the pinned d3d8to9 translator — D3D8 all reach the network this way. It is experimental, and the
-classic D3D9 path pays a fixed few milliseconds a frame that no Resolution Scale can reduce; see
-[the x86 bridge design](docs/x86bridge.md).
+**The toggle hotkey can be rebound, and the rebind sticks.** It could not before, for three reasons
+at once. ReShade hooks `GetAsyncKeyState` and answers 0 for every key while its overlay holds the
+keyboard -- which is exactly when you are trying to press one -- so the capture read an empty
+keyboard forever. The key it did catch was written to the wrong copy of the settings, so the button
+label never changed, the host never heard about it and nothing reached the ini. And a capture that
+started on the frame you clicked would take the click's own key. Capture now reads ReShade's own
+key state, waits for you to let go first, and writes through the shadow copy the panel and the host
+both read. Both the 64-bit add-on and the 32-bit bridge use the same code for it.
 
-Validated live on Half-Life 2 and GTA IV over roughly 37,000 frames without a failure, and on
-Silent Hill 3 through D3D8.
+**An ini with a byte-order mark was being ignored in full.** `GetPrivateProfileInt` reads the file
+as bytes, so a leading `EF BB BF` turns the first line into `<BOM>[dlss5]`, which matches no
+section -- and every value in the file silently falls back to its default, with nothing logged and
+the file looking perfectly fine in any editor. PowerShell 5.1's `Set-Content -Encoding utf8` writes
+one. The mark is now stripped in place at load, and an install that has one repairs itself the next
+time the game starts.
 
-**One installer, for both architectures.** There used to be two: this one, and a separate build for
-32-bit games. There is one now, and it works out which you have by reading the executable rather
-than asking you to know. It offers only the presets that can work for that width, says which
-executable it read, and refuses rather than guesses when a folder holds a 32-bit launcher beside a
-64-bit game.
+**A back buffer with no alpha no longer stops the effect dead.** `B8G8R8X8_UNORM` has no typed UAV
+store on this hardware, so there was no way to write the corrected image back and the add-on
+stopped rather than draw garbage -- every frame, from the first. Measured here on an RX 9070 XT:
+`B8G8R8A8` supports it, `B8G8R8X8` does not, and they are the same four bytes with one channel the
+game never reads. The D3D9 CPU route now carries an X8 back buffer as its A8 twin. This is what
+made the original BioShock, and Half-Life 2 the moment its hotkey started working, produce nothing
+at all.
 
-It also records what it did. An install now writes a manifest of what it installed, what it
-displaced and where the backup went, so uninstall puts things back instead of deleting filenames it
-recognises — and nothing is written at all until every payload, the target folder and every file it
-is about to touch have passed. A game left running stops the install before the first byte rather
-than halfway through a copy.
+**Depth works again on games that rotate their depth targets.** Making a new guide win three
+presents in a row before taking the slot fixed one bug and introduced another: an engine that
+alternates two or three depth buffers never presents the same one three times running, so the slot
+was never filled at all -- no depth, for the whole run, in a game that has depth. With nothing
+chosen yet, three presents of binds are now added together and the leader is taken; the
+three-in-a-row rule still guards a guide that is already chosen. `tools/guide_switch_check.py` is
+that decision as nine assertions.
 
-**`DLSS5_X86BRIDGE_TIMING=1` measures where a frame goes** on the 32-bit routes, splitting the
-bridge into capture, network and return. It is off by default and adds no work of its own. It
-exists because the one performance cliff ever reported here turned out to be a frame-rate cap in
-the game, not the bridge, and guessing had already cost one reverted experiment.
+**Depth on D3D12 was being picked wrong, copied wrong and then believed.** Three separate faults,
+all found by a contributor's measured report on Cyberpunk 2077:
 
-**Nothing changed for D3D11, D3D12 or Vulkan games** beyond the installer. Same add-on, same
-routes, same pinned runtime.
+- the pick was "largest wins", which took a 2048x2048 shadow map over the scene depth. It now
+  tallies binds and clears per present, only considers buffers shaped like the swapchain, and when
+  anything screen-shaped was cleared that present, only cleared buffers are eligible -- the buffer
+  the game clears every frame is the one it draws the scene into;
+- the pre-clear snapshot was created without `ALLOW_DEPTH_STENCIL`, making it a flat texture while
+  the game's depth-stencil is planar. `CopyResource` between those two layouts is not a valid copy
+  and D3D12 does not refuse it, it just returns garbage. The same mistake was in the D3D11 bridge's
+  own snapshot, and is fixed there too;
+- the probe that decides whether depth is real asked only whether the minimum differed from the
+  maximum, which `min 0, max 4.4e30, mean NaN` passes. It now counts samples that are actually in
+  0..1, says JUNK below 90%, and no longer stops looking after one bad reading.
 
-**It requires the pinned v0.2.17 runtime.** v0.2.14 is refused. If you are updating from v0.3.0 you
-must replace `dlssnr_amd_pass1.dll` and `dlssnr_on_amd_weights.bin` — see
-[the three files](#the-three-files) for the hashes. Delete `dlssnr_amd_pass2.dll` and `pass3.dll`
-if you still have them; nothing has used them for several releases.
+`tools/d3d12_depth_pick_check.py` holds the six properties the new pick has to have.
+
+**The network can no longer take the display driver down with it.** In inline mode the game's own
+queue waits for the network to finish. On a card that cannot carry the resolution asked of it that
+wait becomes seconds -- one report has a 2711 ms dispatch on an RX 9070 at 1920x1080 -- and a
+dispatch that long is a Windows TDR: the driver resets, the device is removed and the game goes
+with it. The watchdog this add-on already wrote into `dlssnr_on_amd.ini` only stops the CPU from
+waiting; it cannot cancel work already on the GPU. So the cost of each evaluation is measured now,
+and after three over 250 ms the network is held one Resolution Scale step lower, with the overlay
+saying so. Your own Scale setting is not overwritten -- move the slider and it asks again.
+
+**`dlss5-neural.ini` is written out in full on the first run.** Every setting, at its default, with
+the ones people actually ask about explained in comments above them. Before, the file listed a
+handful and said "the overlay carries the rest", which is no help at all to anyone running without
+a reachable overlay -- a game under Lossless Scaling or Magpie, or a headless sweep.
+
+**There is an installer now.** See [the installer](#install-it). It finds your
+games, works out which renderer each one uses, downloads and verifies the runtime and the weights
+for you, and installs ReShade along with the add-on.
+
+**It still requires the pinned v0.2.17 runtime.** v0.2.14 is refused by hash. Delete
+`dlssnr_amd_pass2.dll` and `pass3.dll` if you still have them; nothing has used them for several
+releases.
 
 **One package covers every supported renderer.** There is no separate Vulkan build to choose
-between, and since this release no separate 32-bit installer either. The Vulkan transport is
-compiled in and does nothing on a D3D11 or D3D12 game — it hooks one import-table entry, and a game
-that does not import Vulkan has none. Everything that a game loads links the MSVC runtime
-statically, so a game's private, older Visual C++ DLLs cannot stop it loading.
+between, and no separate 32-bit installer. The Vulkan transport is compiled in and does nothing on
+a D3D11 or D3D12 game -- it hooks one import-table entry, and a game that does not import Vulkan
+has none. Everything that a game loads links the MSVC runtime statically, so a game's private,
+older Visual C++ DLLs cannot stop it loading.
 
-**Vulkan is still experimental — read [Case 3](#case-3--vulkan-experimental) before trying it.** It
+**Vulkan is still experimental -- read [Case 3](#case-3--vulkan-experimental) before trying it.** It
 is validated on RPCS3, Detroit: Become Human and DOOM Eternal. It is known not to work on PCSX2,
 for a reason that is structural rather than a bug.
 
@@ -75,10 +111,24 @@ network instead, from a ReShade add-on. That port is
 any of this possible, and this project builds on it rather than replacing it. See
 [Credits](#credits).
 
-**The focus is Direct3D 11 games and emulators.** That is not a limitation, it is where this
-works best: D3D11 is the only path where the game's own depth and motion vectors reach the
-network. On D3D12 an add-on is shown nothing but the swapchain, so the network gets colour and
-guesses at the rest.
+**This was not built for D3D12.** It was built for Direct3D 11, and that is where it works
+properly: D3D11 is the path where the game's own depth and its own motion vectors both reach the
+network, and everything here was designed, measured and tuned against it. A D3D12 game runs, and
+people do run it, but it is the lesser route by design and not by accident -- do not judge this
+project by what it does in a D3D12 game.
+
+Two reasons, and neither is a bug to be fixed later. The network runtime is itself D3D12, so on a
+D3D11 game the add-on loads a private copy of it and keeps the game's own device out of the way;
+on a D3D12 game there is no such separation and the add-on is sharing a device with the thing it
+is correcting. And the game's motion vectors are not reachable there at all, so motion is
+estimated from the image, the same guess an emulator gets.
+
+What did change in v0.5.1 is depth. D3D12 used to be written off here as colour only, and that
+part was wrong: a contributor's measured report on Cyberpunk 2077 showed the depth-stencil binds
+do reach an add-on once the draw events are registered, and that depth was being lost to three
+bugs in how it was picked and copied rather than to anything structural. Those are fixed, so a
+D3D12 game now feeds the network real scene depth. It still gets no real motion, and it is still
+not what this is for.
 
 Run so far, on an RX 9070 XT:
 
@@ -87,7 +137,7 @@ Run so far, on an RX 9070 XT:
 | **Euro Truck Simulator 2** | D3D11 | The best result so far — comparable to the same network running on NVIDIA. |
 | **PCSX2** (PS2 emulator) | D3D11 / D3D12 | Same, and the clips below are from it. |
 | **Need for Speed 2015** | D3D11 | The worked example in Case 1. 1,205 frames on the v0.4.0 build with one skip and no failures. |
-| **GTA V Enhanced** | D3D12 | 23,663 frames, no failures. The degraded case: an add-on is shown nothing but the swapchain, so there is no depth and no game motion. |
+| **GTA V Enhanced** | D3D12 | 23,663 frames, no failures, on v0.5.0 -- before D3D12 depth worked. Motion is still estimated from the image on this API. |
 | **RPCS3** | Vulkan | 1,879 frames on the v0.4.0 build, after 3,360 on the previous one. Experimental — see Case 3. |
 | **Detroit: Become Human** | Vulkan | 9,240 frames, no skips, repeated toggles and two complete swapchain rebuilds on v0.4.1. |
 | **DOOM Eternal** | Vulkan | 3,600 frames, one transient skip during a scale change, repeated Alt+Tab rebuilds on v0.4.1. Requires a graphics present queue; see Case 3. |
@@ -105,17 +155,20 @@ Discord: https://discord.gg/wYhvS3JSHM — for DLSS 5 in general, not a support 
 
 [![Support this project on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/T6T213OVFE)
 
-**Installing it?** → [the installer](#or-let-the-installer-do-it), or
-[the three files](#the-three-files) by hand, then your case:
-**[DirectX 11 game](#case-1--directx-11-games)**,
-**[PS2 emulator](#case-2--ps2-emulator-pcsx2)** or
-**[Vulkan](#case-3--vulkan-experimental)**. No compiler needed.
+**Installing it?** → **[the installer](#install-it)**, which does all of it. By hand instead:
+[the three files](#the-three-files), then your case —
+**[DirectX 11 game](#case-1--directx-11-games)** or
+**[PS2 emulator](#case-2--ps2-emulator-pcsx2)**.
+**[Vulkan](#case-3--vulkan-experimental)** is by hand either way. No compiler needed.
 **Broken?** → [Troubleshooting](#troubleshooting), keyed by what you see on screen.
 **Changing the code?** → [Building it yourself](#building-it-yourself-optional).
 
 ## Videos
 
-PCSX2, no audio. Click a thumbnail, or use the plain links if the thumbnails do not load.
+**[Installing it, with the installer](https://www.youtube.com/watch?v=L2v0b98wReQ)** -- the tutorial, start to finish.
+
+And the network itself, on PCSX2, no audio. Click a thumbnail, or use the plain links if the
+thumbnails do not load.
 
 [![PCSX2 running the network, clip 1](https://github.com/zmodelerlover/dlss5-neural-amd/releases/download/media-v1/pcsx2-0307.jpg)](https://github.com/zmodelerlover/dlss5-neural-amd/releases/download/media-v1/pcsx2-0307.mp4)
 
@@ -132,13 +185,93 @@ PCSX2, no audio. Click a thumbnail, or use the plain links if the thumbnails do 
 | | |
 |---|---|
 | **GPU** | AMD **RDNA3 or RDNA4** with the **HIP 7** runtime, i.e. `amdhip64_7.dll` on the search path. HIP 6 will not do. A current Adrenalin driver ships it. Does nothing on NVIDIA or Intel. |
-| **Renderer** | **Direct3D 11**, **Direct3D 12**, and **Vulkan** (experimental, see Case 3). One package covers all three. OpenGL has no route. |
-| **ReShade** | The **add-on** build, 6.x. The plain one will not load add-ons. Tested on 6.8.0. |
+| **Renderer** | **Direct3D 11** is what this is for. **Direct3D 12** runs but is the lesser route, by design; **Vulkan** is experimental, see Case 3. One package covers all three. OpenGL has no route. |
+| **ReShade** | The **add-on** build, 6.x -- the plain one will not load add-ons. The installer puts 6.8.0 in for you on D3D11 and D3D12; on Vulkan you run ReShade's own setup. |
 | **Disk** | About 150 MB for the network weights. |
 
 ---
 
 # Quick start
+
+## Install it
+
+**There is a video of the whole thing: [installing with the installer, start to finish](https://www.youtube.com/watch?v=L2v0b98wReQ).** If
+you would rather watch than read, that is the tutorial; the rest of this section is the same thing
+in words.
+
+**AMD-NR ReShade Installer**, on the [Releases](https://github.com/zmodelerlover/dlss5-neural-amd/releases)
+page. It is one .exe, it needs nothing installed to run, and it does the whole of this Quick start
+for you: finds the games, works out which renderer each one uses, fetches the runtime and the
+weights, checks every hash, installs ReShade and the add-on, and can put it all back.
+
+**It finds your games.** It reads Steam, Epic, GOG, EA, Ubisoft, Battle.net and Xbox, or you point
+it at the folder you keep games in and it finds them all at once, or you add one folder by hand.
+Reading a launcher is read-only -- nothing is installed or changed by looking. Emulators have their
+own flow, because the files go beside the emulator and not beside the ROMs.
+
+**It works out the renderer, and tells you where that came from.** It reads the PE header and the
+import table of the executable the game actually renders with -- for a Source game that is
+`bin\shaderapidx9.dll`, not the launcher in the root -- and corrects that against a database built
+from PCGamingWiki. It offers only the routes that can exist for that architecture, says which
+executable it read and why it decided what it did, and refuses rather than guesses when a folder
+holds a 32-bit launcher beside a 64-bit game.
+
+It is right most of the time and not all of the time: one folder can hold a D3D11 and a D3D12
+executable, and a game can start on one API from an executable that also supports an older one.
+Both answers are true, only one of them is the route you want, and a wrong route installs perfectly
+and then does nothing in the game. So every game card carries a link to that game's PCGamingWiki
+page, and it is worth thirty seconds before you install.
+
+**It fetches the runtime and the weights.** You do not need the Discord for this any more. They are
+downloaded once, checked against a pinned SHA-256, kept in a cache shared by every game, and
+resumed rather than restarted if the connection drops. Mirrors are tried in turn and every one of
+them is checked against the same hash, so a mirror is never trusted further than that. There is a
+"Download all now" button if you would rather have it before you start, and a "Clear the cache" one
+if you would rather have the disk.
+
+**It installs ReShade too.** Unlike the old installer, which left that to you: the pinned ReShade
+6.8.0 add-on build goes in as the right proxy DLL for the route, and if ReShade is already there
+under another name it is left alone. On Vulkan it is not a proxy DLL at all but a system-wide
+layer, so that one is still ReShade's own installer -- see
+[Case 3](#case-3--vulkan-experimental).
+
+**It says what would stop the install before it starts.** The game still open and holding the
+files, a folder needing administrator rights, no room for the weights, ReShade missing or installed
+twice, and the `DisabledAddons=` line further down this page -- the one that makes the add-on
+silently never load. The first ones are refusals, not warnings: nothing is written until they pass,
+so a failed install cannot leave half of one behind.
+
+**What it writes, it records.** Every install writes a manifest of what it installed, what it
+displaced and where the backup went, so uninstall puts things back rather than deleting filenames
+it recognises. Your `dlss5-neural.ini` is yours and is never removed. A file that changed after the
+install is not deleted behind your back either -- it says so and asks -- and a file the running
+game still has open is kept in the manifest so the next uninstall can finish it.
+
+**Which version goes in is yours to pick.** It reads the releases of this repository and offers
+every one that publishes what a route needs, pinned to the hashes that release publishes, and
+remembers per game which one you chose.
+
+**If it does not work in game**, the Report a problem button collects the logs, what is in the game
+folder and what ReShade wrote, into one .zip. Nothing is sent anywhere: the file is saved and the
+folder opens with it selected, so what leaves your machine is what you choose to hand over.
+
+An installer copies files; it cannot set the renderer inside the game for you. For an emulator
+that setting is the whole difference between working and not, and the installer says which one it
+is on the game's own card. **Vulkan is the one route it cannot do at all** -- there ReShade is a
+system-wide layer rather than a DLL beside the game, so go to
+[Case 3](#case-3--vulkan-experimental).
+
+If you would rather not use it, or you are on a machine that cannot run it, everything it does is
+below, by hand.
+
+---
+
+<details>
+<summary><b>Installing by hand, without the installer</b> &mdash; the three files, and where they go</summary>
+
+This is what the installer does for you, written out. It is still the whole truth about the
+install: the same three files, in the same folder, checked against the same hashes. Nothing
+here is deprecated, and an install done this way is the same install.
 
 ## The three files
 
@@ -172,42 +305,6 @@ hangs the game.
 
 You also need the **add-on** build of ReShade (labelled "with full add-on support") from
 <https://reshade.me/>. The plain one will not load add-ons.
-
-## Or let the installer do it
-
-`dlss5-installer.exe`, on the same Releases page, is the three files and the hash check on one
-screen. Paste the folder holding the two files from the discord, point at the game — the folder it
-runs from, or its .exe — and press F5. The add-on is compiled into it, so it cannot hand out one
-from a different release than the runtime it was built beside, and it verifies both SHA-256s
-before copying anything.
-
-**It works out the target's width itself.** It reads the PE header and offers only the presets that
-exist for it: PCSX2, RPCS3, D3D11, D3D12 or Vulkan for a 64-bit game, and the experimental 32-bit
-bridge presets — D3D11, D3D9 or D3D8 — for a 32-bit one. It says which executable it read, and if a
-folder holds a 32-bit launcher beside a 64-bit game it says that too rather than guessing. There is
-one installer for both architectures; the separate x86 build was retired.
-
-Before you press F5 it says what would stop the install: the game still open and holding the
-files, a folder needing administrator rights, no room for the weights, ReShade missing or
-installed twice, and the `DisabledAddons=` line further down this page — the one that makes the
-add-on silently never load. The first three are refusals, not warnings: nothing is written until
-they pass, so a failed install cannot leave half of one behind.
-
-What does get written is recorded — what it installed, what it displaced, and where the backup of
-it went. F8 reads that back, puts any displaced file where it was, and leaves `dlss5-neural.ini`
-alone along with anything you changed after installing.
-
-It does **not** install ReShade on the 64-bit routes, and is not going to. That stays ReShade's own
-installer. The 32-bit bridge is the one exception, and only when a release carries the pinned
-ReShade sidecar: it never downloads anything and never runs ReShade's setup, and a public release
-without that sidecar behaves exactly like the rest — you install ReShade, it checks the hash.
-
-The rest of this section is the same thing by hand, which is worth reading either way: the
-installer copies files, it does not tell you which renderer to set.
-
-Now pick your case.
-
----
 
 ## Case 1 — DirectX 11 games
 
@@ -259,6 +356,8 @@ game in the list → Properties → Graphics. In `gamesettings\<SERIAL>.ini` the
 
 A PS2 never computed per-pixel motion, so motion is estimated from the image here rather than
 read, and the depth it does have is faint. That is a property of the console, not of the add-on.
+
+</details>
 
 ---
 
@@ -371,11 +470,11 @@ The residual measurement in the first one is the useful bit. `mean 0.000000` mea
 returned its input untouched, which is a completely different problem from a nonzero residual
 that looks wrong on screen. They are indistinguishable from the couch.
 
-If the problem is the **installer** rather than the add-on, the file is a different one: it writes
-`dlss5-installer.log` next to `dlss5-installer.exe` whenever something fails and prints the path
-on its bottom line. Everything it saw is in there. If the installer's own screen looks wrong —
-no colour, broken layout — run it as `dlss5-installer.exe --diag`, which writes
-`dlss5-installer-diag.txt` next to the exe and asks the console what it actually supports.
+If the problem is the **installer** rather than the add-on, use its own Report a problem button:
+it collects its logs, its settings, what is in the game folder and what ReShade wrote, into one
+.zip and opens the folder with it selected. Nothing is sent anywhere. Its logs live in
+`%AppData%\AmdNrInstaller\logs` if you would rather read them yourself -- one file per install or
+uninstall, each carrying the route, who chose it, the evidence behind it and the payload hashes.
 
 ## The settings
 
@@ -660,7 +759,6 @@ identical from the couch and need completely different fixes.
 | `tools/patch_runtime.py` | rebuilds the runtime from `version.dll`. |
 | `tools/runtime-patches.json` | the five patches, with offsets and bytes. |
 | `tools/SHA256SUMS.txt` | hashes for the runtime and weights, which the repo does not ship. |
-| `installer/` | the terminal installer, in Rust with ratatui. Its own README; `target/` is ignored, so the repo carries no Rust build output. Only the built `.exe` ships, in a release. |
 | `tools/check_shaders.ps1` | extracts the HLSL out of `neural.cpp` and runs `fxc` on it. A shader typo otherwise only shows up as a log line inside the game. |
 | `build.ps1` | builds an add-on with `cl.exe`, no VS project. |
 | `CHANGELOG.md` | what changed between releases. |
