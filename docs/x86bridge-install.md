@@ -8,6 +8,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-x86bridge.ps1
 
 The script compiles addon32 x86 /MT, host64 x64 /MT and the new installer x64 /MT, tests the protocol on both architectures, checks PE/import boundaries, and builds the current integrated addon64 from the same checkout. It places the new pair and installer in `release/`. With the private sidecars present, it also runs installer filesystem tests there. Those tests use synthetic PE targets, never the real game folder.
 
+User-facing install instructions are in [install.md](install.md); this document is the build and
+regression side of the same thing.
+
 Open `release/dlss5-installer.exe` -- one installer for both architectures since the separate x86 build was retired. Point field 2 at the game: it reads the PE header, says which width it found, and offers only the presets that exist for it. For a 32-bit target that is D3D11, D3D9 or the experimental D3D8 preset, and it wants the executable rather than the folder because it verifies the header before it plans. Field 1 takes the release folder, or the folder holding the runtime and weights. PE32+ targets are rejected. API selection is manual; import-based autodetection was not added. Close the game before install/uninstall. If ReShade's root `ReShade.ini` contains an `[INSTALL] BasePath` inside the selected game directory, the installer safely follows it; this supports Source-engine layouts that load the proxy and add-ons from `bin`.
 
 ## Defaults and UI

@@ -602,6 +602,30 @@ uninstall re-hashing before it acts. Changing it changes the manifest format.
 `windows-sys`, so adding the `Win32_Graphics_Gdi` and `Win32_UI_WindowsAndMessaging` features would
 let that paint code be ported onto the same engine if the GUI is wanted back.
 
+### Portuguese in the installer
+
+Deferred past v0.5.0 on purpose: the release was verified and green, and this touches enough of the
+suite that doing it first would have meant publishing something different from what was tested.
+
+Scale, measured rather than guessed: **213 user-facing string literals in production code** --
+107 in `engine.rs`, 81 in `work.rs`, and the rest in the TUI shell and `main.rs`. Test modules
+excluded.
+
+The part that decides how it is done: **around twenty tests assert on the English text of those
+messages** -- `err.contains("PE32/x86")`, `has_err(&report, "does not match the expected SHA-256")`,
+`"open by another program"` and others. A translation has to either pin those to the English
+variant or move them to keys. Whichever, decide it before the first string moves, because doing it
+halfway leaves a suite that passes only in one language.
+
+Worth settling at the same time:
+
+- How the language is chosen. A key in the TUI is the obvious fit, and defaulting from the Windows
+  locale would mean most people never press it. It should be remembered between runs.
+- Whether the engine's refusals translate too, or stay English as diagnostics. They are what a
+  confused person reads, so translating the shell alone is the worst of both.
+- `docs/install.md` ships inside the download as its README, so a translated installer with an
+  English README is only half the job.
+
 ### Housekeeping
 
 `patch_*.py` in `.gitignore` is anchored to the root now, but a file recreated under a name it

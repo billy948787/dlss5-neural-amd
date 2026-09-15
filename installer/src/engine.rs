@@ -716,7 +716,17 @@ impl Installer {
         let dir = install_directory(target)?;
         let mut p: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
-        let sums = String::from_utf8_lossy(&read(&self.release.join("payload.sha256"))?).to_string();
+        // Say what the folder is, not that a file could not be read. Getting field 1 wrong is the
+        // ordinary mistake here, and "Cannot read ...\payload.sha256" tells nobody what to do.
+        let manifest = self.release.join("payload.sha256");
+        require(
+            manifest.is_file(),
+            format!(
+                "{} does not look like the unpacked download: it has no payload.sha256 beside a files folder. Point field 1 at the folder you unzipped.",
+                self.release.display()
+            ),
+        )?;
+        let sums = String::from_utf8_lossy(&read(&manifest)?).to_string();
         for name in ["dlss5-neural.addon32", "dlss5-neural-host64.exe"] {
             let bytes = self.payload(name, &Self::bridge_sum(&sums, name)?)?;
             let want = if name.contains("addon32") { MACHINE_X86 } else { MACHINE_X64 };
@@ -749,10 +759,19 @@ impl Installer {
             let existing = dir.join(reshade_name);
             require(
                 existing.exists(),
-                "Install official ReShade 6.8 Full Add-on Support for the selected API first, or provide private files/dxgi.dll",
+                format!(
+                    "ReShade is not installed for this API: there is no {reshade_name} in the game folder. Install ReShade 6.8.0.2156 with full add-on support, 32-bit, against the game's own executable and pick the API it uses."
+                ),
             )?;
             let b = read(&existing)?;
-            hash_is(&b, RESHADE_SHA, "Existing ReShade (requires tested 6.8.0.2156 x86 full-addon binary)")?;
+            // Having *a* ReShade is not the same as having the one this was tested against, and the
+            // difference is invisible unless it is said out loud.
+            require(
+                sha(&b) == RESHADE_SHA,
+                format!(
+                    "The {reshade_name} already in the game folder is a different build from the one this was tested with. It has to be ReShade 6.8.0.2156 with full add-on support, 32-bit -- a newer version is refused too, not just an older one."
+                ),
+            )?;
             b
         };
         require(machine(&reshade)? == MACHINE_X86, "ReShade must be x86")?;
@@ -1176,6 +1195,33 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("engine-{tag}-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Long messages are wrapped across source lines with a trailing backslash. Lose it and the
+    /// source indentation is baked into the sentence, which reads as a run of spaces mid-line on
+    /// screen. It has happened twice, so this reads the file rather than trusting review.
+    #[test]
+    fn no_message_in_this_file_carries_its_own_source_indentation() {
+        let source = include_str!("engine.rs");
+        let mut offenders = Vec::new();
+        for (n, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            // Only string literals that start mid-line, i.e. continuations of a wrapped message.
+            if !trimmed.starts_with('"') || trimmed.starts_with("\"\"") {
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix('"') {
+                // Four or more, not two: the docking layout ReShade writes uses runs of two and
+                // three spaces on purpose, while lost indentation is a whole source indent.
+                if rest.contains("    ") && !rest.contains("\n") {
+                    offenders.push((n + 1, line.trim().to_string()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a message lost its line continuation and kept the indentation: {offenders:?}"
+        );
     }
 
     #[test]
