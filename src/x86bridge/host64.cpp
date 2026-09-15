@@ -153,7 +153,7 @@ struct Host {
     const bool jobPending =
         g.fence->GetCompletedValue() < g.completion ||
         static_cast<UINT>(InterlockedCompareExchange(
-            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x8d6f4)), 0, 0)) <
+            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, rt::kJobCounter)), 0, 0)) <
             g.lastJob;
     if (jobPending && GetTickCount64() - g.lastJobAt < 500)
     {
@@ -243,7 +243,7 @@ struct Host {
     ID3D12CommandList *lists[] { cmd };
     g.workQueue->ExecuteCommandLists(1, lists);
     if (g.activePasses != 0)
-        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9170)(
+        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + rt::kNotifyFn)(
             g.workQueue.Get(), 1, lists);
     g.ringValue[i] = ++g.ringSerial;
     Check(g.workQueue->Signal(g.ringFence.Get(), g.ringSerial), "ring signal");

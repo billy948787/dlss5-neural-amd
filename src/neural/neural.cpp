@@ -635,6 +635,11 @@ void Barrier(ID3D12GraphicsCommandList *c, ID3D12Resource *r, D3D12_RESOURCE_STA
     c->ResourceBarrier(1, &v);
 }
 
+// Every address written into the runtime lives in this header, and nowhere else. It used to be
+// four copies across neural.cpp, vk_route.inc, host64.cpp and framecheck.cpp; a version bump
+// updated two of them and the 32-bit bridge crashed on its first frame.
+#include "runtime_offsets.h"
+
 // v0.3.0 of DLSS-NR-on-AMD, lifted out of its setup by tools/extract_runtime.py and run
 // through tools/patch_runtime.py -- this is the hash of the patched file, which is what
 // the add-on loads. Every offset below was re-derived against this build. Nothing moved by
@@ -2581,7 +2586,7 @@ bool FinishSubmittedPass()
         return false;
     const UINT64 deadline = GetTickCount64() + 5000;
     while (static_cast<UINT>(InterlockedCompareExchange(
-        reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x977d4)), 0, 0)) < g.lastJob)
+        reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, rt::kJobCounter)), 0, 0)) < g.lastJob)
     {
         if (GetTickCount64() >= deadline || DeviceLost())
         {
@@ -2600,7 +2605,7 @@ bool SubmitPrivatePass(ID3D12GraphicsCommandList *cmd, ID3D12CommandAllocator *a
         return false;
     ID3D12CommandList *lists[] {cmd};
     g.queue->ExecuteCommandLists(1, lists);
-    reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9460)(
+    reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + rt::kNotifyFn)(
         g.queue.Get(), 1, lists);
     if (!FinishSubmittedPass())
         return false;
@@ -2665,7 +2670,7 @@ void BridgePresent(device *dev, swapchain *sc)
     const bool jobPending =
         g.fence->GetCompletedValue() < g.completion ||
         static_cast<UINT>(InterlockedCompareExchange(
-            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x977d4)), 0, 0)) <
+            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, rt::kJobCounter)), 0, 0)) <
             g.lastJob;
     if (!jobPending && g.jobRunning)
     {
@@ -2798,7 +2803,7 @@ void BridgePresent(device *dev, swapchain *sc)
     ID3D12CommandList *lists[] { cmd };
     g.workQueue->ExecuteCommandLists(1, lists);
     if (g.activePasses != 0)
-        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9460)(
+        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + rt::kNotifyFn)(
             g.workQueue.Get(), 1, lists);
     g.ringValue[i] = ++g.ringSerial;
     g.workQueue->Signal(g.ringFence.Get(), g.ringSerial);
@@ -3136,30 +3141,30 @@ bool InitEngine()
         AddVectoredExceptionHandler(1, NullJumpProbe);
         probeUp = true;
     }
-    At<ID3D12Device *>(h, 0x96f68) = g.device.Get();
+    At<ID3D12Device *>(h, rt::kDevice) = g.device.Get();
     g.device->AddRef();
-    At<ID3D12CommandQueue *>(h, 0x96f70) = g.queue.Get();
+    At<ID3D12CommandQueue *>(h, rt::kQueue) = g.queue.Get();
     g.queue->AddRef();
-    At<int>(h, 0x97c30) = g.hipDevice;
-    At<uint8_t>(h, 0x977a0) = g.inlineMode.load() ? 1 : 0;
-    At<uint8_t>(h, 0x97984) = 1;
-    At<uint8_t>(h, 0x97b1c) = 1;
-    At<uint8_t>(h, 0x97b1e) = 1;
-    At<uint8_t>(h, 0x97b1f) = 0;
-    At<int>(h, 0x97b20) = RuntimeTonemap();
+    At<int>(h, rt::kHipDevice) = g.hipDevice;
+    At<uint8_t>(h, rt::kInlineMode) = g.inlineMode.load() ? 1 : 0;
+    At<uint8_t>(h, rt::kInterop) = 1;
+    At<uint8_t>(h, rt::kEnabled) = 1;
+    At<uint8_t>(h, rt::kUseFsrInputs) = 1;
+    At<uint8_t>(h, rt::kUseDepth) = 0;
+    At<int>(h, rt::kTonemap) = RuntimeTonemap();
     Log("input contract: encoding %d, tonemap requested %d -> runtime %d; FP16 is transport, "
         "not a colour-space declaration. Restart after changing encoding or tonemap.",
         g.encoding.load(), g.tonemap.load(), RuntimeTonemap());
 
     const std::string file = weights.string();
     if (g.hipSet(g.hipDevice) != 0 ||
-        !reinterpret_cast<InitFn>(reinterpret_cast<uintptr_t>(h) + 0x1fe80)(
-            reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(h) + 0x96f78), &file))
+        !reinterpret_cast<InitFn>(reinterpret_cast<uintptr_t>(h) + rt::kInitFn)(
+            reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(h) + rt::kEngineObject), &file))
     {
         Log("engine init failed.");
         return false;
     }
-    At<uint8_t>(h, 0x97298) = 1;
+    At<uint8_t>(h, rt::kReady) = 1;
     g.runtime = h;
     g.engineReady = true;
     Log("engine ready.");
@@ -3172,8 +3177,10 @@ bool InitEngine()
     // stays at whatever it was. Read-only -- this writes nothing.
     {
         char line[512];
-        int n = std::snprintf(line, sizeof(line), "engine floats 0x97b28..0x97b44:");
-        for (size_t rva = 0x97b28; rva <= 0x97b44 && n > 0 && n < static_cast<int>(sizeof(line));
+        int n = std::snprintf(line, sizeof(line), "engine floats 0x%zx..0x%zx:", rt::kFloatDumpFirst,
+                              rt::kFloatDumpLast);
+        for (size_t rva = rt::kFloatDumpFirst;
+             rva <= rt::kFloatDumpLast && n > 0 && n < static_cast<int>(sizeof(line));
              rva += 4)
             n += std::snprintf(line + n, sizeof(line) - n, " [%zx]=%.3f", rva,
                                static_cast<double>(At<float>(h, rva)));
@@ -3181,8 +3188,10 @@ bool InitEngine()
         // Dump the byte window the engine has just finished initialising. A field the engine
         // owns holds a plausible default; a field nothing uses holds whatever the loader left.
         // This is read-only and runs after init, so what it prints is the engine's own state.
-        n = std::snprintf(line, sizeof(line), "engine bytes 0x97b10..0x97b27:");
-        for (size_t rva = 0x97b10; rva <= 0x97b27 && n > 0 && n < static_cast<int>(sizeof(line));
+        n = std::snprintf(line, sizeof(line), "engine bytes 0x%zx..0x%zx:", rt::kByteDumpFirst,
+                          rt::kByteDumpLast);
+        for (size_t rva = rt::kByteDumpFirst;
+             rva <= rt::kByteDumpLast && n > 0 && n < static_cast<int>(sizeof(line));
              ++rva)
             n += std::snprintf(line + n, sizeof(line) - n, " %02x",
                                static_cast<unsigned>(At<uint8_t>(h, rva)));
@@ -3351,12 +3360,12 @@ bool EnsureResources(UINT w, UINT h, DXGI_FORMAT outFormat, float scale)
     {
         const UINT64 deadline = GetTickCount64() + 5000;
         while (static_cast<UINT>(InterlockedCompareExchange(
-                   reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x977d4)), 0, 0)) <
+                   reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, rt::kJobCounter)), 0, 0)) <
                    g.lastJob &&
                    GetTickCount64() < deadline)
             Sleep(1);
         if (static_cast<UINT>(InterlockedCompareExchange(
-                reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x977d4)), 0, 0)) < g.lastJob)
+                reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, rt::kJobCounter)), 0, 0)) < g.lastJob)
         {
             Log("raster: runtime job %u did not become idle in 5 s; keeping its textures alive "
                 "instead of releasing memory that the GPU may still own.", g.lastJob);
@@ -4439,8 +4448,8 @@ bool RecordNetwork(ID3D12GraphicsCommandList *&cmd, ID3D12Resource *colourSrc,
         // Off by default because these are hardcoded offsets into one specific build: a wrong
         // pointer here does not fail, it hangs the game.
         const bool wantHistory = g.useHistory.load() && g.historyValid.load() && g.history != nullptr;
-        At<uint8_t>(r, 0x97098) = wantHistory ? 1 : 0;
-        At<void *>(r, 0x97090) = wantHistory ? static_cast<void *>(g.history.Get()) : nullptr;
+        At<uint8_t>(r, rt::kHistoryOn) = wantHistory ? 1 : 0;
+        At<void *>(r, rt::kHistory) = wantHistory ? static_cast<void *>(g.history.Get()) : nullptr;
         if (wantHistory && !g.loggedHistory)
         {
             g.loggedHistory = true;
@@ -4453,12 +4462,12 @@ bool RecordNetwork(ID3D12GraphicsCommandList *&cmd, ID3D12Resource *colourSrc,
         // non-zero motion, which is not a coincidence, it is what temporal accumulation is for.
         // Auto still follows haveMotion, which is the sane default; the other two are explicit.
         const int tm = g.temporalMode.load();
-        At<uint8_t>(r, 0x97b1d) =
+        At<uint8_t>(r, rt::kTemporal) =
             static_cast<uint8_t>(tm == 1 ? 0 : tm == 2 ? 1 : (haveMotion ? 1 : 0));
         // Never written before. UseAutoMask is the engine's own character masking -- the same
         // field RenoDX exposes as "Character Mask" -- and it defaults to 1, so the add-on was
         // silently relying on the default. ToneChannels and Scale were not known to exist.
-        At<int>(r, 0x97b40) = g.autoMask.load();
+        At<int>(r, rt::kUseAutoMask) = g.autoMask.load();
         // Bits 2 and 4 of ToneChannels stopped being tone channels in v0.2.17. The apply shader
         // now reads them as the timeout policy, in one line:
         //
@@ -4473,26 +4482,26 @@ bool RecordNetwork(ID3D12GraphicsCommandList *&cmd, ID3D12Resource *colourSrc,
         // keep the current frame and never paste a stale correction. Upstream has since made the
         // same choice available as a flag, so the patch is gone and these two bits carry it. Bit 1
         // is the only one left that means what the name says.
-        At<int>(r, 0x97b44) = (g.toneChannels.load() & ~2) | 4;
-        At<float>(r, 0x97b3c) = g.engineScale.load();
-        At<int>(r, 0x97b20) = RuntimeTonemap();
-        At<uint8_t>(r, 0x977a0) = g.inlineMode.load() ? 1 : 0;
-        At<uint8_t>(r, 0x97b1f) = haveDepth ? 1 : 0;
+        At<int>(r, rt::kToneChannels) = (g.toneChannels.load() & ~2) | 4;
+        At<float>(r, rt::kScale) = g.engineScale.load();
+        At<int>(r, rt::kTonemap) = RuntimeTonemap();
+        At<uint8_t>(r, rt::kInlineMode) = g.inlineMode.load() ? 1 : 0;
+        At<uint8_t>(r, rt::kUseDepth) = haveDepth ? 1 : 0;
         // 97b10 DepthInverted, pinned to the engine's own default. Both runtimes boot this at
         // 1 -- the NVIDIA DLL writes options+260 = 1 when the parameter is absent, and the AMD
         // port's static initialiser sets dword_180076E10 = 1 -- and no run here ever produced a
         // reading that told the two settings apart. It was a switch that could only be wrong, so
         // it is written, not exposed.
-        At<UINT>(r, 0x97b10) = 1u;
-        At<uint8_t>(r, 0x97b14) = 1;
+        At<UINT>(r, rt::kDepthInverted) = 1u;
+        At<uint8_t>(r, rt::kFsrFlagsSeen) = 1;
         // All three come from one place now, and that place is per-pass. Local Tone is written on
         // the first pass only -- which is what the original `i == 0 ? tone : 0.0f` here did, and
         // last session removed it as an asymmetry nobody had chosen. Somebody had: the reference
         // fork's PassProfiles.h makes exactly that choice, in one line, deliberately.
         const PassTune tune = TuningFor(i);
-        At<float>(r, 0x97b30) = tune.tone;
-        At<float>(r, 0x97b34) = tune.structure;
-        At<float>(r, 0x97b38) = tune.skin;
+        At<float>(r, rt::kLocalTone) = tune.tone;
+        At<float>(r, rt::kLocalStructure) = tune.structure;
+        At<float>(r, rt::kSkinStructure) = tune.skin;
 
         Packet packet {};
         packet.list = cmd;
@@ -4511,18 +4520,18 @@ bool RecordNetwork(ID3D12GraphicsCommandList *&cmd, ID3D12Resource *colourSrc,
         // the equality test below is comparing cmd against cmd whatever the engine did, and a
         // silently refused pass 2 would be counted as accepted. The job id is the field that
         // changes per evaluation, so an id that does not move is a pass that did not run.
-        const UINT jobBefore = At<UINT>(r, 0x97a6c);
-        reinterpret_cast<RecordFn>(reinterpret_cast<uintptr_t>(r) + 0x12640)(&packet);
-        const UINT jobAfter = At<UINT>(r, 0x97a6c);
+        const UINT jobBefore = At<UINT>(r, rt::kJobId);
+        reinterpret_cast<RecordFn>(reinterpret_cast<uintptr_t>(r) + rt::kRecordFn)(&packet);
+        const UINT jobAfter = At<UINT>(r, rt::kJobId);
 
-        if (At<uint8_t>(r, 0x9729a) != 0)
+        if (At<uint8_t>(r, rt::kNativeFailure) != 0)
         {
             nativeFailure = true;
             g.failed = true;
             Log("pass %u reported a native failure. Stopping.", i + 1);
             break;
         }
-        if (At<ID3D12CommandList *>(r, 0x97a60) != cmd)
+        if (At<ID3D12CommandList *>(r, rt::kListMarker) != cmd)
         {
             if (++g.skipped % 600 == 1)
                 Log("pass %u refused (%llu total)", i + 1,
@@ -4548,7 +4557,7 @@ bool RecordNetwork(ID3D12GraphicsCommandList *&cmd, ID3D12Resource *colourSrc,
             Log("pass %u of %u: job id %u -> %u (%s), list marker %s", i + 1, wanted, jobBefore,
                 jobAfter, jobAfter != jobBefore ? "moved, the engine recorded something"
                                                : "DID NOT MOVE -- this pass may be a no-op",
-                At<ID3D12CommandList *>(r, 0x97a60) == cmd ? "ours" : "not ours");
+                At<ID3D12CommandList *>(r, rt::kListMarker) == cmd ? "ours" : "not ours");
 
         // Inline submission orders both the image dependency and the CPU tuning.
         // The legacy batch path below only orders resource accesses on the GPU.
@@ -5093,7 +5102,7 @@ void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, 
     const bool jobPending =
         g.fence->GetCompletedValue() < g.completion ||
         static_cast<UINT>(InterlockedCompareExchange(
-            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x977d4)), 0, 0)) <
+            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, rt::kJobCounter)), 0, 0)) <
             g.lastJob;
     if (!jobPending && g.jobRunning)
     {
@@ -5129,7 +5138,7 @@ void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, 
     }
     if (!RecordNetwork(cmd, backbuffer, bd.Format, nullptr, runNetwork, wanted, [&]() {
         ID3D12CommandList *submitted[] {cmd};
-        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9460)(
+        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + rt::kNotifyFn)(
             g.queue.Get(), 1, submitted);
         queue->flush_immediate_command_list();
         if (!FinishSubmittedPass())
@@ -5171,7 +5180,7 @@ void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, 
     const UINT nw = g.netWidth, nh = g.netHeight;
     ID3D12CommandList *submitted[] { cmd };
     if (g.activePasses != 0)
-        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9460)(
+        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + rt::kNotifyFn)(
             g.queue.Get(), 1, submitted);
     queue->flush_immediate_command_list();
     DrainReadbacks(nw, nh);

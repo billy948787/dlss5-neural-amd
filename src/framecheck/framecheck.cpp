@@ -52,7 +52,7 @@ void Submit(bool notify = false)
     ID3D12CommandList *lists[] {g.list[0].Get()};
     g.queue->ExecuteCommandLists(1, lists);
     if (notify)
-        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + 0x9460)(
+        reinterpret_cast<NotifyFn>(reinterpret_cast<uintptr_t>(g.runtime) + rt::kNotifyFn)(
             g.queue.Get(), 1, lists);
     const auto value = ++g.ringSerial;
     Hr(g.queue->Signal(g.ringFence.Get(), value), "signal");
@@ -66,7 +66,7 @@ void Submit(bool notify = false)
         // before reusing the fixture/output or starting the next evaluation.
         const auto deadline = GetTickCount64() + 30000;
         while (static_cast<UINT>(InterlockedCompareExchange(
-            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x977d4)), 0, 0)) < g.lastJob)
+            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, rt::kJobCounter)), 0, 0)) < g.lastJob)
         {
             Check(GetTickCount64() < deadline, "runtime job did not complete");
             Sleep(1);
@@ -195,7 +195,7 @@ void Run(const std::filesystem::path &input, int frames)
         const double gpu = (ticks[1] - ticks[0]) * 1000.0 / frequency;
         times->Unmap(0, &none);
         const UINT watchdog = static_cast<UINT>(InterlockedCompareExchange(
-            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, 0x97954)), 0, 0));
+            reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, rt::kWatchdogJobB)), 0, 0));
         timing << f << ',' << gpu << ',' << wall << ',' << g.lastJob << ',' << g.activePasses
                << ',' << watchdog << '\n';
         timing.flush();

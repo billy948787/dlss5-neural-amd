@@ -1,34 +1,38 @@
 """Check the add-on's hardcoded runtime offsets against the runtime binary itself.
 
-Every address in `InitEngine` and `RecordPasses` is a raw write into someone else's DLL, and a
-wrong one does not fail -- it hangs the game or jumps into nothing. The only thing standing
-between a bad port and a hang used to be reading the disassembly carefully. This is that reading,
-written down so it runs.
+Every address in `src/neural/runtime_offsets.h` is a raw write into someone else's DLL, and a wrong
+one does not fail politely -- it writes into read-only memory, or calls into the middle of an
+unrelated function. The only thing standing between a bad port and that used to be reading the
+disassembly carefully. This is that reading, written down so it runs.
 
-It reads the offsets out of `src/neural/neural.cpp` rather than keeping its own copy, so it cannot
-drift from the source it is checking.
+    python tools/runtime_offsets_check.py <dlssnr_amd_pass1.dll>
 
-    python tools/runtime_offsets_check.py <dlssnr_amd_pass1.dll> [src/neural/neural.cpp]
+What it proves, in the order of how much each would have caught:
 
-What it proves, in order of how much it would have caught:
-
-  * The record entry's first three tests -- the gate every evaluation passes through -- resolve to
-    three addresses the add-on actually uses. Those are `Enabled`, the native-failure byte and the
-    engine-ready byte, and they are decoded out of the instruction stream, not assumed. A port that
-    moved the option struct but missed one of these lands here.
-  * Every data offset falls inside `.data`, and every entry point inside `.text`. Catches a whole
-    block re-derived against the wrong build.
-  * The file is the exact build `kRuntimeSha256` names, and it has been through
-    `patch_runtime.py` -- both patch sites carry their patched bytes.
+  * **No source file holds a runtime offset of its own.** The offsets were once copied into four
+    files; the move to v0.3.0 updated two, and the two that kept v0.2.17's job counter crashed the
+    32-bit bridge on its first frame and left the same crash unfired in the Vulkan route. Both
+    passed a build and a full test suite. Only the header may name an address now.
+  * The record entry's first three tests -- the gate every evaluation goes through -- resolve to
+    three addresses the header names. Those are Enabled, the native-failure byte and the ready
+    byte, decoded out of the instruction stream rather than assumed.
+  * Every data offset lands in `.data` and every entry point in `.text`. `.rdata` is where a stale
+    data offset goes to fault, so this is not a formality.
+  * The file is the build `kRuntimeSha256` names, and it has been through `patch_runtime.py`.
 
 No binaries ship with this project: the DLL is yours.
 """
 
 import hashlib
+import json
 import re
 import struct
 import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+HEADER = ROOT / "src/neural/runtime_offsets.h"
+SOURCES = ROOT / "src"
 
 
 def sections(data):
@@ -48,41 +52,49 @@ def sections(data):
     return out
 
 
-def source_facts(text):
-    """The pins and every runtime offset the add-on writes, read out of neural.cpp."""
-    digest = re.search(r"kRuntimeSha256\[32\]\s*=\s*\{(.*?)\}", text, re.S)
-    size = re.search(r"kRuntimeSize\s*=\s*(\d+)", text)
-    if digest is None or size is None:
-        raise ValueError("kRuntimeSha256 / kRuntimeSize not found in the source")
-    sha = bytes(int(b, 16) for b in re.findall(r"0x([0-9a-fA-F]{2})", digest.group(1)))
-    # Data: every At<T>(module, 0xRVA), plus the engine object handed to the init entry -- that one
-    # is `base + rva` like an entry point is, which is exactly why it has to be picked out by what
-    # it is cast TO. Calling it code and looking for it in .text is a false alarm, and the first
-    # run of this script raised one.
-    data = {int(m, 16) for m in re.findall(r"At<[^>]+>\([^,]+,\s*0x([0-9a-fA-F]+)\)", text)}
-    data |= {int(m, 16) for m in re.findall(
-        r"reinterpret_cast<void\s*\*>\(reinterpret_cast<uintptr_t>\([^)]+\)\s*\+\s*0x([0-9a-fA-F]+)\)", text)}
-    # Code: only what is cast to a function pointer and then called.
-    code = {int(m, 16) for m in re.findall(
-        r"reinterpret_cast<\w+Fn>\(reinterpret_cast<uintptr_t>\([^)]+\)\s*\+\s*0x([0-9a-fA-F]+)\)", text)}
-    return sha, int(size.group(1)), data, code
+def header_offsets():
+    """{name: rva} from the header, split into data and entry points by the `Fn` suffix."""
+    text = HEADER.read_text(encoding="utf-8")
+    found = dict(re.findall(r"(k\w+)\s*=\s*0x([0-9a-fA-F]+)", text))
+    if not found:
+        raise ValueError(f"no offsets in {HEADER}")
+    data, code = {}, {}
+    for name, value in found.items():
+        (code if name.endswith("Fn") else data)[name] = int(value, 16)
+    return data, code
 
 
-def rip_target(data, text_raw_delta, rva, length):
+def stray_literals():
+    """Any source file that still writes an address itself instead of naming one.
+
+    This is the check the crash asked for. The two forms that matter are the ones that reach the
+    runtime: `At<T>(module, 0x...)` and `reinterpret_cast<...>(reinterpret_cast<uintptr_t>(module)
+    + 0x...)`. A number anywhere else in these files is not an offset and is left alone.
+    """
+    at = re.compile(r"At<[^>]+>\([^,]+,\s*(0x[0-9a-fA-F]+)\s*\)")
+    plus = re.compile(r"reinterpret_cast<uintptr_t>\([^)]+\)\s*\+\s*(0x[0-9a-fA-F]+)")
+    out = []
+    for path in sorted(SOURCES.rglob("*")):
+        if path.suffix.lower() not in (".cpp", ".h", ".hpp", ".inc", ".c", ".cc") or path == HEADER:
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            for m in at.findall(line) + plus.findall(line):
+                out.append((path.relative_to(ROOT).as_posix(), number, m))
+    return out
+
+
+def rip_target(data, delta, rva, length):
     """Where a rip-relative instruction at `rva` points. `length` is the whole instruction."""
-    disp = struct.unpack_from("<i", data, rva - text_raw_delta + length - 5)[0]
+    disp = struct.unpack_from("<i", data, rva - delta + length - 5)[0]
     return rva + length + disp
 
 
 def main(argv):
-    if not 2 <= len(argv) <= 3:
+    if len(argv) != 2:
         print(__doc__)
         return 2
     dll = Path(argv[1])
-    src = Path(argv[2]) if len(argv) == 3 else Path(__file__).resolve().parent.parent / "src/neural/neural.cpp"
-
     raw = dll.read_bytes()
-    want_sha, want_size, data_rvas, code_rvas = source_facts(src.read_text(encoding="utf-8", errors="replace"))
 
     bad = []
     def check(ok, said):
@@ -90,35 +102,46 @@ def main(argv):
         if not ok:
             bad.append(said)
 
-    print(f"{dll}  against  {src}")
+    print(f"{dll}\n  against {HEADER.relative_to(ROOT).as_posix()} and every source under src/\n")
+
+    # -- The one that would have caught the crash ------------------------------------------------
+    stray = stray_literals()
+    check(not stray, f"no source file writes an offset of its own ({len(stray)} found)")
+    for path, number, value in stray:
+        print(f"         {path}:{number} writes {value} -- name it in runtime_offsets.h instead")
+
+    # -- The file is the build these offsets belong to -------------------------------------------
+    source = (ROOT / "src/neural/neural.cpp").read_text(encoding="utf-8", errors="replace")
+    digest = re.search(r"kRuntimeSha256\[32\]\s*=\s*\{(.*?)\}", source, re.S)
+    size = re.search(r"kRuntimeSize\s*=\s*(\d+)", source)
+    want_sha = bytes(int(b, 16) for b in re.findall(r"0x([0-9a-fA-F]{2})", digest.group(1))).hex()
+    want_size = int(size.group(1))
 
     check(len(raw) == want_size, f"size {len(raw)} == kRuntimeSize {want_size}")
     got = hashlib.sha256(raw).hexdigest()
-    check(got == want_sha.hex(), f"sha256 {got[:16]}… == kRuntimeSha256 {want_sha.hex()[:16]}…")
-    if bad:
-        print("\nthe file is not the build these offsets belong to; nothing below would mean anything")
+    check(got == want_sha, f"sha256 {got[:16]}... == kRuntimeSha256 {want_sha[:16]}...")
+    if got != want_sha or len(raw) != want_size:
+        print("\nthis is not the build these offsets belong to; nothing below would mean anything")
         return 1
 
+    data_off, code_off = header_offsets()
     secs = {name: (va, vsize, rawp) for name, va, vsize, rawp in sections(raw)}
     text_va, text_vsize, text_raw = secs[".text"]
     data_va, data_vsize, _ = secs[".data"]
     delta = text_va - text_raw
 
-    outside = sorted(r for r in data_rvas if not data_va <= r < data_va + data_vsize)
-    check(not outside, f"{len(data_rvas)} data offsets inside .data "
-                       f"[{data_va:#x}..{data_va + data_vsize:#x})"
-                       + ("" if not outside else "  -- outside: " + ", ".join(f"{r:#x}" for r in outside)))
+    astray = sorted((n, v) for n, v in data_off.items() if not data_va <= v < data_va + data_vsize)
+    check(not astray, f"{len(data_off)} data offsets inside .data "
+                      f"[{data_va:#x}..{data_va + data_vsize:#x})"
+          + ("" if not astray else "  -- outside: " + ", ".join(f"{n}={v:#x}" for n, v in astray)))
 
-    astray = sorted(r for r in code_rvas if not text_va <= r < text_va + text_vsize)
-    check(not astray, f"{len(code_rvas)} entry points inside .text "
-                      f"[{text_va:#x}..{text_va + text_vsize:#x})"
-                      + ("" if not astray else "  -- outside: " + ", ".join(f"{r:#x}" for r in astray)))
+    off_text = sorted((n, v) for n, v in code_off.items() if not text_va <= v < text_va + text_vsize)
+    check(not off_text, f"{len(code_off)} entry points inside .text "
+                        f"[{text_va:#x}..{text_va + text_vsize:#x})"
+          + ("" if not off_text else "  -- outside: " + ", ".join(f"{n}={v:#x}" for n, v in off_text)))
 
-    # The gate. The record entry opens with cmp byte [rip+d],1 then two test byte [rip+d],1, and
-    # those three addresses are Enabled, the native-failure byte and the engine-ready byte. Walk
-    # them out of the bytes: an offset the add-on writes that the engine does not read here, or the
-    # other way round, is the bug this whole file exists to catch.
-    record = min(code_rvas, key=lambda r: abs(r - 0x12640)) if code_rvas else None
+    # -- The gate, decoded out of the record entry -----------------------------------------------
+    record = code_off["kRecordFn"]
     gate, at = [], record
     for opcode, length in ((b"\x80\x3d", 7), (b"\xf6\x05", 7), (b"\xf6\x05", 7)):
         found = raw.find(opcode, at - delta, at - delta + 0x80)
@@ -128,18 +151,16 @@ def main(argv):
         gate.append(rip_target(raw, delta, at, length))
         at += length
     check(len(gate) == 3, f"record entry {record:#x}: decoded {len(gate)} of 3 opening tests")
-    for name, rva in zip(("Enabled", "native-failure", "engine-ready"), gate):
-        check(rva in data_rvas, f"record entry gates on {rva:#x} ({name}), which the add-on uses")
+    for want, rva in zip(("kEnabled", "kNativeFailure", "kReady"), gate):
+        check(data_off.get(want) == rva,
+              f"record entry gates on {rva:#x}, which the header calls {want} "
+              f"({data_off.get(want, 0):#x})")
 
-    # And that the DLL went through patch_runtime.py, because an unpatched one installs its own
-    # detours on top of ours and executes every list twice.
-    spec = src.parent.parent / "tools/runtime-patches.json"
-    if spec.exists():
-        import json
-        for change in json.loads(spec.read_text())["changes"]:
-            off, after = int(change["offset"], 16), bytes.fromhex(change["after"])
-            check(raw[off:off + len(after)] == after,
-                  f"patch at {change['offset']} applied ({change['reason'].split(',')[0][:54]}…)")
+    # -- And the DLL went through patch_runtime.py -----------------------------------------------
+    spec = ROOT / "tools/runtime-patches.json"
+    for change in json.loads(spec.read_text())["changes"]:
+        off, after = int(change["offset"], 16), bytes.fromhex(change["after"])
+        check(raw[off:off + len(after)] == after, f"patch at {change['offset']} applied")
 
     print("\n" + ("PASS" if not bad else f"FAIL: {len(bad)} check(s)"))
     return 0 if not bad else 1
