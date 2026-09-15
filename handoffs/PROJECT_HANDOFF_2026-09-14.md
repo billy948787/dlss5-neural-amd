@@ -6,14 +6,15 @@ history from chat. Read this file first, then the repository README, changelog a
 
 ## 1. Read this before changing anything
 
-- The active branch is **`x86_testing`**.
+- Work on **`master`**. The `x86_testing` branch this document was written on is merged and
+  deleted; v0.5.0 was cut from the merge.
 - Remote `origin` is `https://github.com/zmodelerlover/dlss5-neural-amd.git`.
 - Every path in this document is relative: repository paths to the checkout root, game paths to
   wherever that game is installed. Keep a single checkout of this repository and work only in it.
 
-**Updated later on 2026-09-14.** The work this handoff was written to preserve is committed and
-pushed. The worktree is clean and `x86_testing` matches `origin/x86_testing`; the dirty tree the
-original text described was separated into these commits, in this order:
+**Updated later on 2026-09-14.** The work this handoff was written to preserve is committed,
+merged and released as v0.5.0. The dirty tree the original text described was separated into these
+commits, which are now in `master`:
 
 | Commit | Contents |
 |---|---|
@@ -25,7 +26,8 @@ original text described was separated into these commits, in this order:
 | `cfdd1af` | stop ignoring `tools/patch_runtime.py` and `installer/Cargo.lock`, which are not artifacts |
 | `6b273e8` | opt-in stage probe behind `DLSS5_X86BRIDGE_TIMING=1` |
 
-Do not push to `master`; continue through feature branches and PRs.
+The next feature goes on its own branch and reaches `master` through a PR, the way this one did.
+Nothing is in flight now: `master` is the release, and section 11 is what is left to pick up.
 
 ## 2. Last action and exact rollback state
 
@@ -535,8 +537,8 @@ in section 1, and GTA IV and Half-Life 2 were revalidated on the committed tree 
 5. Confirm or dismiss the D3D9 reference-count observation in section 4.6.
 6. Everything that does not block a release now lives in section 11, so it stays visible instead of
    being rediscovered.
-7. Before committing, run `git diff --check`, the full x86 build above and the main x64 checks. Do
-   not push to `master`; continue through feature branches and PRs as the user requested.
+7. Before committing, run `git diff --check`, the full x86 build above, the main x64 checks and
+   `cargo test` in `installer/`. Put feature work on its own branch and merge it through a PR.
 
 ## 10. Primary repository references
 
