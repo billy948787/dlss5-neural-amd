@@ -766,8 +766,10 @@ identical from the couch and need completely different fixes.
 | `src/vkbridge/vkbridge.cpp` | round-trips known bytes across that boundary both ways and compares them. `-Target vkbridge -Exe`. |
 | `src/vkshared/vk_raw.inc` | the slice of Vulkan those two need, declared against the spec so no Vulkan SDK is required. |
 | `external/reshade/` | ReShade + ImGui headers, vendored so a clean clone builds. See `NOTICE.md`. |
+| `src/neural/runtime_offsets.h` | every address this add-on writes into the runtime, named, and the only place any of them appears. Four files used to hold their own copies and two were left on the previous version; see the CHANGELOG. |
 | `tools/patch_runtime.py` | rebuilds the runtime from `version.dll`. |
-| `tools/runtime-patches.json` | the five patches, with offsets and bytes. |
+| `tools/runtime-patches.json` | the three patches, with offsets, the bytes before and after, and why. |
+| `tools/runtime_offsets_check.py` | checks that header against the runtime itself: every address in the right section, the record entry's opening tests decoded out of the instruction stream, and no source file writing an offset of its own. |
 | `tools/SHA256SUMS.txt` | hashes for the runtime and weights, which the repo does not ship. |
 | `tools/check_shaders.ps1` | extracts the HLSL out of `neural.cpp` and runs `fxc` on it. A shader typo otherwise only shows up as a log line inside the game. |
 | `build.ps1` | builds an add-on with `cl.exe`, no VS project. |

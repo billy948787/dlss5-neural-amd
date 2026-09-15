@@ -7,6 +7,17 @@ hash. The weights are unchanged, so an upgrade replaces a 7 MB DLL and downloads
 
 - Move to **DLSS-NR-on-AMD v0.3.0**. Every offset this add-on writes into was re-derived against
   it; see [below](#the-runtime-moved-to-v030).
+- Keep every one of those offsets in `src/neural/runtime_offsets.h` and nowhere else. They used to
+  be copied into four files, the move to v0.3.0 updated two, and the 32-bit bridge's host then died
+  with an access violation on its first evaluation in every game — the v0.2.17 job counter lands in
+  `.rdata` on v0.3.0, and the interlocked write there is a write into read-only memory. The Vulkan
+  route carried the same crash, and a stale entry point beside it that would have been called
+  rather than faulted.
+- Copy the depth guide as a depth-stencil on the 32-bit bridge as well. The 64-bit path got that
+  fix earlier in this release and the bridge kept the broken half, so a 32-bit D3D11 game with a
+  planar depth format was still feeding the network garbage.
+- Read the settings once on the run that writes the ini, rather than parsing it twice and printing
+  the same two lines twice.
 - Write `Async=0` rather than `Inline=1` into a new `dlssnr_on_amd.ini`. v0.3.0 renamed that key
   and inverted it. An ini written by an older release still comes out inline, because the unknown
   key is ignored and the new one defaults to inline.
@@ -94,8 +105,38 @@ This add-on drives the runtime itself and cannot have both, so none of those fou
 this route. The packet field that opts into pre-upscale is left zero, which is the default and the
 only correct value here.
 
-Compiled, and the offsets verified statically against both binaries. **Not yet observed in a
-game** — see the validation list in the handoff.
+### The two routes that were still on v0.2.17
+
+The port above was verified against both binaries, compiled clean, passed the whole suite and two
+code reviews, and was still wrong in two of the four files that hold these offsets. `neural.cpp`
+and `framecheck.cpp` were re-derived. `host64.cpp` and `vk_route.inc` were not, because the sweep
+that found them searched a partial list of patterns and never matched `.inc` at all. It reported
+clean.
+
+What that cost: `0x8d6f4` is the v0.2.17 job counter, and on v0.3.0 that address is inside
+`.rdata`. The access is `lock cmpxchg`, a write, and `.rdata` is mapped read-only — so the 32-bit
+bridge's 64-bit host took `0xc0000005` on its first evaluation, in every game, deterministically.
+The frontend saw it as `ERROR_BROKEN_PIPE`, restarted the host, and watched it die again. The
+Vulkan route had the same line and had simply not been run. Beside each sat a stale `0x9170`,
+which is worse in the way that matters: on v0.3.0 that RVA is still inside `.text`, in the middle
+of an unrelated function, so it would have been **called** rather than faulted.
+
+The fix is not the four lines. `src/neural/runtime_offsets.h` now holds every address, named, and
+the four files use the names — all of them compile into one translation unit, so one header
+reaches all four. `tools/runtime_offsets_check.py` reads that header and, alongside checking every
+address against the runtime's own sections and decoding the record entry's opening tests out of
+the instruction stream, **fails when any source file writes an offset of its own**:
+
+```
+FAIL no source file writes an offset of its own (1 found)
+     src/x86bridge/host64.cpp:156 writes 0x8d6f4 -- name it in runtime_offsets.h instead
+```
+
+Compiled, statically verified against both binaries, and now run in a game: Need for Speed 2015
+reads the engine's own defaults back at the new addresses (`LocalStructure` 1.000,
+`SkinStructure` -1.000, `Scale` 0.031), 4800 jobs at about 10 ms each, a non-zero residual, and
+the runtime's new preemptible wait active. The 32-bit bridge came up on Bully after the fix. **The
+Vulkan route is fixed and has not been run.**
 
 ## v0.5.0 — 2026-09-14 — The 32-bit bridge, D3D8, and one installer
 
