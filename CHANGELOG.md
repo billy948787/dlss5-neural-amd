@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.5.2 - 2026-09-15 - The overlay saves itself
+
+Same pinned **DLSS-NR-on-AMD v0.3.0** runtime and the same weights as v0.5.1, so an upgrade is the
+three add-on files and nothing else — the 141 MB does not move.
 
 - **The overlay saves itself.** Every control now writes to `dlss5-neural.ini` the moment you let
   go of it, on both the 64-bit route and the 32-bit bridge. Save Settings stays — it is still what
