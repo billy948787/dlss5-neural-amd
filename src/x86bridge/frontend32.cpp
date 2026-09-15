@@ -312,8 +312,24 @@ bool PrepareGuide(Guide &guide, bool isDepth)
         td.Format = guide.format;
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(g.game11->CreateTexture2D(&td, nullptr, &guide.snap)))
+        // BIND_DEPTH_STENCIL for a depth format, so the CopyResource below is between two
+        // resources of the same kind. Same defect and same reasoning as the 64-bit path -- see
+        // the comment on this in neural.cpp's PrepareGuide -- and this route had been left with
+        // the broken half of it: a planar depth-stencil copied into a plain shader-resource
+        // texture comes back as garbage the network is then fed as depth.
+        const bool isDepth = GuideDepthSrvFormat(guide.format) != DXGI_FORMAT_UNKNOWN;
+        td.BindFlags = isDepth ? (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL)
+                               : D3D11_BIND_SHADER_RESOURCE;
+        HRESULT made = g.game11->CreateTexture2D(&td, nullptr, &guide.snap);
+        if (FAILED(made) && isDepth)
+        {
+            Log("guide depth: %ux%u format %u was refused as a depth-stencil copy (0x%08lX); "
+                "falling back to a plain shader-resource copy, which may not read correctly.",
+                w, h, static_cast<unsigned>(guide.format), static_cast<unsigned long>(made));
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            made = g.game11->CreateTexture2D(&td, nullptr, &guide.snap);
+        }
+        if (FAILED(made))
         {
             guide.failed = true;
             Log("guide depth: private %ux%u copy of format %u could not be created.", w, h,
