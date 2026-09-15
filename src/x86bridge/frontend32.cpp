@@ -52,6 +52,7 @@ struct Guide
 
     ID3D11Resource *challenger = nullptr;
     UINT challengerFrames = 0;
+    UINT coldFrames = 0;
     UINT width = 0, height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 
@@ -129,14 +130,47 @@ void SettleGuide(Guide &guide, std::unordered_map<void *, Tallied> &tally)
         return;
     }
 
-    if (guide.challenger != best->res.Get())
+    // Nothing chosen yet: add three presents up, then take the leader.
+    //
+    // The streak rule below exists to protect an incumbent, and with no incumbent there is
+    // nothing to protect -- only the question of having seen enough. Asking one candidate to win
+    // three presents *running* is a rule this case cannot always satisfy: an engine that rotates
+    // two or three depth targets never presents the same one three times in a row, so the
+    // challenger changed every present, the streak reset every present, and the guide was never
+    // taken at all. No depth, in a game that has depth, for as long as it runs. Measured against
+    // tools/guide_switch_check.py: a rotating pair leaves the slot empty after a hundred presents.
+    //
+    // So the tally is left standing rather than cleared, and three presents of binds add up
+    // before the leader is taken. Rotating targets each keep their own share and one of them
+    // wins; the scene pass still outbinds a shadow map by an order of magnitude; and a single odd
+    // frame still cannot decide it alone.
+    const bool cold = guide.chosen == nullptr;
+    if (cold)
+    {
+        if (++guide.coldFrames < 3)
+            return;  // deliberately NOT cleared -- leaving it standing is what accumulates
+        guide.coldFrames = 0;
+    }
+    // A challenger has to win more than one frame.
+    //
+    // The tally is cleared every present, so "most-bound" was decided by a single frame, and a
+    // single frame is not always a representative one. The GTA San Andreas log has the depth
+    // guide walk away from a buffer bound 96440 times to one bound *9 times*, on the frame the
+    // game changed resolution and stopped drawing its scene pass: the incumbent simply was not
+    // in that frame's tally, so a nine-bind buffer won by being the only thing there. Every frame
+    // after that fed the network the wrong depth, and nothing demotes a chosen guide, so it never
+    // recovered.
+    //
+    // Three frames is enough to outlast a resolution change, a loading screen or an alt-tab, and
+    // short enough that a real switch costs nothing anyone can see.
+    else if (guide.challenger != best->res.Get())
     {
         guide.challenger = best->res.Get();
         guide.challengerFrames = 1;
         tally.clear();
         return;
     }
-    if (++guide.challengerFrames < 3)
+    else if (++guide.challengerFrames < 3)
     {
         tally.clear();
         return;
@@ -144,15 +178,16 @@ void SettleGuide(Guide &guide, std::unordered_map<void *, Tallied> &tally)
     guide.challenger = nullptr;
     guide.challengerFrames = 0;
     guide.chosenBinds = best->binds;
-    guide.chosen = best->res;  
+    guide.chosen = best->res;  // takes a reference; the tally's is about to go
     guide.width = best->width;
     guide.height = best->height;
     guide.format = best->format;
     guide.ready = false;
     guide.logged = false;
     guide.failed = false;
-    Log("guide %s: taking %ux%u format %u, bound %u times a frame for three frames running",
-        guide.name, best->width, best->height, static_cast<unsigned>(best->format), best->binds);
+    Log("guide %s: taking %ux%u format %u, bound %u times %s", guide.name, best->width,
+        best->height, static_cast<unsigned>(best->format), best->binds,
+        cold ? "over the first three presents" : "a frame for three frames running");
     tally.clear();
 }
 
@@ -771,6 +806,11 @@ HRESULT FlushAndWait9()
     return hr;
 }
 
+// Must match neural.cpp's. This frontend is its own translation unit and cannot see that one; what
+// keeps the two in step is tools/test-x86bridge.py, which compares the bodies below character for
+// character and fails when they drift -- which is how this floor was found missing here.
+constexpr UINT kGuideFloor = 256;
+
 bool LooksLikeMotion(const D3D11_TEXTURE2D_DESC &d, UINT screenW, UINT screenH)
 {
     if (d.SampleDesc.Count != 1 || d.ArraySize != 1)
@@ -778,7 +818,14 @@ bool LooksLikeMotion(const D3D11_TEXTURE2D_DESC &d, UINT screenW, UINT screenH)
     if (d.Format != DXGI_FORMAT_R16G16_FLOAT && d.Format != DXGI_FORMAT_R32G32_FLOAT &&
         d.Format != DXGI_FORMAT_R16G16_SNORM)
         return false;
-    return screenW == 0 || (d.Width * 2 >= screenW && d.Height * 2 >= screenH);
+    // An absolute floor first, because the relative one below is measured against a swapchain
+    // size that is zero until the effect has been enabled once -- and "anything passes while the
+    // size is unknown" is how a 1x1 buffer became the motion guide.
+    if (d.Width < kGuideFloor || d.Height < kGuideFloor)
+        return false;
+    if (screenW == 0 || screenH == 0)
+        return true;
+    return d.Width * 2 >= screenW && d.Height * 2 >= screenH;
 }
 
 void ObserveD3D11(device *dev, const resource_view *rtvs, uint32_t count, resource depthRes)

@@ -155,6 +155,11 @@ struct Host {
         static_cast<UINT>(InterlockedCompareExchange(
             reinterpret_cast<volatile LONG *>(&At<UINT>(g.runtime, rt::kJobCounter)), 0, 0)) <
             g.lastJob;
+    if (!jobPending && g.jobRunning)
+    {
+        g.jobRunning = false;
+        NoteJobCost(GetTickCount64() - g.lastJobAt);
+    }
     if (jobPending && GetTickCount64() - g.lastJobAt < 500)
     {
         runNetwork = false;
