@@ -1468,7 +1468,8 @@ bool EnsureNeuralIni()
     }
     f << "[dlss5]\r\n"
          "; Written because no dlss5-neural.ini was here. Every value below is the default, so\r\n"
-         "; this file changes nothing until you edit it. The overlay's Save writes back here.\r\n"
+         "; this file changes nothing until you edit it. The overlay writes back here on its own,\r\n"
+         "; as soon as a control settles; the Save button does the same thing on demand.\r\n"
          "\r\n"
          "; --- starting up -------------------------------------------------------------\r\n"
          "; 1 = the effect is already on when the game opens. 0 = the game shows its own\r\n"
@@ -1480,7 +1481,7 @@ bool EnsureNeuralIni()
          "; ToggleKey is a Windows virtual-key code; 0x23 (35) is End. ToggleMods adds up\r\n"
          "; 1 Ctrl + 2 Alt + 4 Shift, so 1 is Ctrl and 0 is no modifier at all. Together\r\n"
          "; these default to Ctrl+End. Easier than looking codes up: open the overlay,\r\n"
-         "; click the key button, press the combination you want, then Save.\r\n"
+         "; click the key button and press the combination you want; it is kept on its own.\r\n"
          "ToggleKey=35\r\n"
          "ToggleMods=1\r\n"
          "\r\n"
@@ -1651,22 +1652,12 @@ void LoadSettings()
 // the matching Win32 writer, and the numbers are formatted in the C locale for the same reason
 // the reader parses in it -- a pt-BR install would otherwise write "0,50", which the reader then
 // stops at the comma.
-void SaveSettings(bool quiet)
+// Every key that belongs in the ini, listed once. SaveSettings writes them and the overlay's
+// autosave hashes them; two lists would drift, and a setting present in one but not the other is a
+// control that quietly stops being saved -- which is the bug this whole pair exists to prevent.
+template <class Num, class Flag>
+void ForEachSetting(Num num, Flag flag)
 {
-    const auto ini = (ExeDirectory() / L"dlss5-neural.ini").wstring();
-    auto num = [&](const wchar_t *key, double v) {
-        wchar_t buf[64];
-        static _locale_t c_locale = _create_locale(LC_NUMERIC, "C");
-        if (c_locale != nullptr)
-            _swprintf_s_l(buf, 64, L"%.4g", c_locale, v);
-        else
-            swprintf_s(buf, 64, L"%.4g", v);
-        WritePrivateProfileStringW(L"dlss5", key, buf, ini.c_str());
-    };
-    auto flag = [&](const wchar_t *key, bool v) {
-        WritePrivateProfileStringW(L"dlss5", key, v ? L"1" : L"0", ini.c_str());
-    };
-
     num(L"Scale", g.scale.load());
     num(L"Passes", g.passes.load());
     num(L"Language", g.language.load());
@@ -1720,9 +1711,43 @@ void SaveSettings(bool quiet)
     // Stage / Events / NoBridge / NoBackBuffer are deliberately not written back. They are
     // startup diagnostics, they cannot take effect live, and rewriting them here would quietly
     // re-save a one-off value that was meant for a single run.
-    // Quiet while the first-run file is being filled in: that line is the only proof anyone has
-    // that the overlay's Save reached the disk, so it has to keep meaning only that.
+}
+
+void SaveSettings(bool quiet)
+{
+    const auto ini = (ExeDirectory() / L"dlss5-neural.ini").wstring();
+    ForEachSetting(
+        [&](const wchar_t *key, double v) {
+            wchar_t buf[64];
+            static _locale_t c_locale = _create_locale(LC_NUMERIC, "C");
+            if (c_locale != nullptr)
+                _swprintf_s_l(buf, 64, L"%.4g", c_locale, v);
+            else
+                swprintf_s(buf, 64, L"%.4g", v);
+            WritePrivateProfileStringW(L"dlss5", key, buf, ini.c_str());
+        },
+        [&](const wchar_t *key, bool v) {
+            WritePrivateProfileStringW(L"dlss5", key, v ? L"1" : L"0", ini.c_str());
+        });
+    // Quiet while the first-run file is being filled in, and while autosaving: that line is the
+    // only proof anyone has that the overlay's Save reached the disk, so it keeps meaning only that.
     if (!quiet) Log("settings saved to dlss5-neural.ini");
+}
+
+// "Has anything changed" without reading the ini back. FNV-1a over the same values, rounded through
+// float first so a control that never left its own precision cannot look like an edit.
+uint64_t SettingsFingerprint()
+{
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](double v) {
+        const float f = static_cast<float>(v);
+        uint32_t bits = 0;
+        std::memcpy(&bits, &f, sizeof(bits));
+        h = (h ^ bits) * 1099511628211ull;
+    };
+    ForEachSetting([&](const wchar_t *, double v) { mix(v); },
+                   [&](const wchar_t *, bool v) { mix(v ? 1.0 : 0.0); });
+    return h;
 }
 
 // Our own D3D12 device on the adapter the game is already using, so shared textures and fences
@@ -6579,12 +6604,12 @@ void OnOverlay(effect_runtime *runtime)
     if (ImGui::Button(T("Save Settings", "Salvar Ajustes")))
         SaveSettings();
     Help("Writes everything above to dlss5-neural.ini next to the exe, so it survives a restart.\n\n"
-         "Without this the overlay is a scratchpad: every A/B test meant re-dialling half a dozen "
-         "controls by hand on the next run.",
+         "You do not have to press it: every control saves itself the moment you let go of it. This "
+         "is here to write now, and to put a line in the log saying it happened.",
 
          "Escreve tudo acima no dlss5-neural.ini ao lado do exe, para sobreviver a um restart.\n\n"
-         "Sem isto o overlay é um rascunho: cada teste A/B significava re-ajustar meia dúzia de "
-         "controles na mão na execução seguinte.");
+         "Você não precisa apertar: cada controle se salva sozinho assim que você solta. Isto serve "
+         "para escrever agora, e para deixar uma linha no log dizendo que aconteceu.");
     ImGui::SameLine();
     if (ImGui::Button(T("Reload Settings", "Recarregar Ajustes")))
     {
@@ -6593,6 +6618,23 @@ void OnOverlay(effect_runtime *runtime)
     }
     Help("Re-reads dlss5-neural.ini, discarding anything changed here since the last save.",
          "Relê o dlss5-neural.ini, descartando qualquer coisa mudada aqui desde o último salvamento.");
+
+    // Autosave. The button above stays -- it is still the only thing that says out loud that a write
+    // happened -- but nothing should be lost because somebody never scrolled this far. Written when a
+    // control settles rather than while it is being dragged: WritePrivateProfileString rewrites the
+    // whole file once per key, so a slider held down would be fifty full rewrites a second.
+    static uint64_t saved = SettingsFingerprint();
+    if (const uint64_t now = SettingsFingerprint(); now != saved && !ImGui::IsAnyItemActive())
+    {
+        SaveSettings(/*quiet=*/true);
+        saved = now;
+        static bool said = false;
+        if (!said)
+        {
+            Log("settings autosaved to dlss5-neural.ini; every later change saves itself the same way.");
+            said = true;
+        }
+    }
 }
 
 }
