@@ -205,6 +205,12 @@ struct Front {
     x86bridge::Handle process,pipe,job;DWORD hostPid=0;LUID luid{};
     swapchain* active=nullptr;bool settings=false,enabled=false,failed=false,built=false,reset=true,hidden=false,keyDown=false,transport=false;
     int toggleKey=VK_END,toggleMods=1;bool disableAltTab=false;uint64_t generation=0,frame=0;
+    // Pipelined presentation, off unless the ini asks. When on, a frame is posted at the end of one
+    // present and its answer collected at the start of the next, so the helper works while the game
+    // builds its next frame instead of while the game waits. pendingFrame is what the outstanding
+    // answer belongs to, and the raster it was captured at, because an answer that outlived a resize
+    // describes a back buffer that no longer exists and must be dropped rather than composed.
+    bool async=false,pending=false;x86bridge::Frame pendingFrame{};UINT pendingWidth=0,pendingHeight=0;
 } g;
 // Opt-in per-stage measurement, off unless DLSS5_X86BRIDGE_TIMING=1.
 //
@@ -233,6 +239,34 @@ struct StageProbe {
     void Keep(double in,double h,double out){if(!on)return;input+=in;host+=h;output+=out;++frames;}
     bool Due() const {return on&&frames>=120;}
     void Drop(){frames=0;input=host=output=0.0;}
+    // The game's own pace, measured present to present.
+    //
+    // The stage numbers above say what the bridge costs. They cannot say what the game costs, and
+    // the pipelining estimate needs both: pipelining replaces a frame time of game+bridge with
+    // max(game+transport, network), so without the game term the predicted gain is a shape rather
+    // than a number. Toggling the effect off in a fixed scene and comparing these two lines
+    // supplies it.
+    //
+    // Sampled before the effect's own early-outs, so it keeps measuring while the effect is off,
+    // and it still issues no wait of its own. A window that spans a toggle is discarded rather
+    // than averaged, because half of it would be measuring the other thing.
+    //
+    // A gap past kPeriodOutlierMs is not a rendered frame -- alt-tab, a loading screen, a
+    // breakpoint -- and one of them swamps an average of 120, so it is dropped. That biases the
+    // result slightly optimistic, which is worth knowing when reading it.
+    long long presentMark=0;double period=0.0;unsigned periodFrames=0;bool periodEffect=false;
+    static constexpr double kPeriodOutlierMs=250.0;
+    void Present(bool effectOn){
+        if(!on)return;
+        LARGE_INTEGER c{};if(!QueryPerformanceCounter(&c))return;
+        if(presentMark!=0&&effectOn==periodEffect){
+            const double ms=static_cast<double>(c.QuadPart-presentMark)*toMs;
+            if(ms<=kPeriodOutlierMs){period+=ms;++periodFrames;}
+        }else{period=0.0;periodFrames=0;periodEffect=effectOn;}
+        presentMark=c.QuadPart;
+    }
+    bool PeriodDue() const {return on&&periodFrames>=120;}
+    void PeriodDrop(){periodFrames=0;period=0.0;}
 } probe;
 // How stale the overlay stamp may get before a pending rebind is abandoned. It has to
 // outlast the gap between the overlay's draw callbacks, which is far longer than a frame:
@@ -264,6 +298,9 @@ void StopHost(){
     g.pipe.reset();if(g.process&&WaitForSingleObject(g.process.value,0)!=WAIT_OBJECT_0){
         TerminateProcess(g.process.value,7);WaitForSingleObject(g.process.value,x86bridge::IpcTimeoutMs);
     }
+    // The pipe is gone, so the outstanding answer is gone with it. Clearing this here is what
+    // makes every Fault path safe without each one remembering to.
+    g.pending=false;
     g.job.reset();g.process.reset();g.built=false;g.reset=true;
 }
 void Fault(const char* reason){Log("x86bridge ORIGINAL: %s (win32=%lu)",reason,GetLastError());g.failed=true;StopHost();}
@@ -903,10 +940,17 @@ void Settings(){
     // whatever set the variable, so it inherits nothing and run-with-timing.cmd reports probe=off
     // there no matter what. GTA IV does exactly that.
     // The ini is already open on the line above and travels with the install, so it always arrives.
+    // Pipelining gives up the same-frame guarantee, and it is the default because the measurements
+    // say the trade is one-sided: +16% to +41% across GTA IV, Resident Evil 5 and Half-Life 2, for
+    // one frame of lag and no image cost. The back buffer is replaced whole, so a pipelined frame is
+    // the previous one finished rather than a mix of two, and all three were checked in both modes
+    // with no difference seen. Async=0 restores the old behaviour. Ini rather than environment, for
+    // the same reason Timing is.
+    g.async=GetPrivateProfileIntW(L"dlss5",L"Async",1,ini.c_str())!=0;
     wchar_t timingFlag[8]{};
     probe.Arm((GetEnvironmentVariableW(L"DLSS5_X86BRIDGE_TIMING",timingFlag,8)==1&&timingFlag[0]==L'1')
               ||GetPrivateProfileIntW(L"dlss5",L"Timing",0,ini.c_str())!=0);
-    Log("x86bridge native x86 protocol=%u mode=%s StartOn=%d ToggleKey=%d ToggleMods=%d probe=%s",x86bridge::Version,g.transport?"TRANSPORT_ONLY":"NEURAL",g.enabled,g.toggleKey,g.toggleMods,probe.on?"on":"off");
+    Log("x86bridge native x86 protocol=%u mode=%s StartOn=%d ToggleKey=%d ToggleMods=%d probe=%s present=%s",x86bridge::Version,g.transport?"TRANSPORT_ONLY":"NEURAL",g.enabled,g.toggleKey,g.toggleMods,probe.on?"on":"off",g.async?"pipelined":"same-frame");
 }
 bool StartHost(){
     if(g.process)return WaitForSingleObject(g.process.value,0)==WAIT_TIMEOUT;
@@ -1003,6 +1047,27 @@ void ClearGuide(Guide& v){
     v.challenger=nullptr;v.challengerFrames=0;v.chosenBinds=0;v.width=v.height=v.snapW=v.snapH=0;
     v.srvOf=nullptr;v.uavOf=nullptr;v.snapFmt=v.format=DXGI_FORMAT_UNKNOWN;v.ready=v.failed=v.logged=false;
 }
+// Collect the answer to a frame posted by an earlier present.
+//
+// The pipe carries one conversation and SyncControls talks on it every present, so this has to run
+// before anything else touches the pipe. An uncollected frame answer would be delivered into the
+// next unrelated call and the protocol would never recover.
+//
+// This is also where the pipelined path spends whatever is left of the helper's work. If the game's
+// own frame outlasted the network there is nothing left and this returns at once, which is the
+// entire point of posting a present early.
+//
+// got says an answer arrived and matched. The return value says the pipe is still trustworthy;
+// false means the caller must fault, because a mismatched or missing answer leaves the conversation
+// out of step and no later request on this pipe can be believed.
+bool CollectPending(x86bridge::Ack& a,bool& got){
+    got=false;
+    if(!g.pending)return true;
+    g.pending=false;
+    if(!x86bridge::Collect(g.pipe.value,g.process.value,x86bridge::Kind::Frame,a))return false;
+    if(a.generation!=g.pendingFrame.generation||a.frame!=g.pendingFrame.id)return false;
+    got=true;return true;
+}
 void ReleaseLocal(){
     g_depthTally.clear();g_motionTally.clear();ClearGuide(g.guideDepth);ClearGuide(g.guideMotion);
     ReleaseD3D9Stage();
@@ -1026,6 +1091,14 @@ void OnInit(swapchain* sc,bool){
 void OnDestroy(swapchain* sc,bool resize){
     std::lock_guard lock(g.lock);if(sc!=g.active)return;
     Log("x86bridge retiring swapchain resize=%d",resize);
+    // A pipelined frame may still be outstanding. Collect it before anything below touches the pipe
+    // or releases a resource the helper is still writing into. This is a bounded pipe read, not a
+    // GPU wait and not a driver call, so it does not re-enter the display driver that the rest of
+    // this function is written to stay out of.
+    if(g.pending){
+        x86bridge::Ack drop{};bool got=false;
+        if(!CollectPending(drop,got))StopHost();
+    }
 
     // ReShade calls destroy_swapchain from inside IDirect3DDevice9::Reset. At that point the
     // native D3D9 device is already transitioning through its lost/reset state. Submitting an
@@ -1104,6 +1177,13 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
     if(!sc)return;auto* dev=sc->get_device();const auto api=dev->get_api();
     if(api!=device_api::d3d11&&api!=device_api::d3d9)return;
     std::lock_guard lock(g.lock);Settings();
+    probe.Present(g.enabled);
+    if(probe.PeriodDue()){
+        const double avg=probe.period/static_cast<double>(probe.periodFrames);
+        if(avg>0.0)Log("x86bridge frame period over %u frames: %.2f ms (%.1f FPS) with the effect %s",
+            probe.periodFrames,avg,1000.0/avg,probe.periodEffect?"on":"off");
+        probe.PeriodDrop();
+    }
     struct ClearFrameTallies {~ClearFrameTallies(){g_depthTally.clear();g_motionTally.clear();}} clearFrameTallies;
     if(g.active&&g.active!=sc)return; // one active swapchain per process, never mix resource owners
     if(!g.active){g.active=sc;g.reset=true;}
@@ -1167,6 +1247,13 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
     }
     if(g.nativeD3D9!=(api==device_api::d3d9)){Fault("graphics API changed for active bridge");return;}
     if(!StartHost()){Fault("helper missing, launch failed, or host died");return;}
+    // Before SyncControls, which uses the same pipe. In same-frame mode nothing is ever pending and
+    // this is a no-op; the split is measured either way so a log says how much of the helper's work
+    // the game's own frame managed to cover.
+    probe.Begin();
+    x86bridge::Ack pendingAck{};bool havePending=false;
+    if(!CollectPending(pendingAck,havePending)){Fault("pipelined frame reply failed or mismatched");return;}
+    const double collectMs=probe.Split();
     if(!SyncControls()){Fault("control protocol v2 synchronization failed");return;}
     if(!g.enabled){g.reset=true;return;}
     ComPtr<ID3D11Texture2D> bb;
@@ -1202,12 +1289,33 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
     x86bridge::Frame f;f.generation=g.generation;f.id=++g.frame;f.resetHistory=g.reset;
     f.depthValid=g.guideDepth.ready;f.motionValid=g.guideMotion.ready;
     const double inputMs=probe.Split();
-    x86bridge::Ack a;
-    if(!x86bridge::Request(g.pipe.value,g.process.value,x86bridge::Kind::Frame,&f,sizeof(f),a)||a.generation!=f.generation||a.frame!=f.id){Fault("frame reply failed/mismatched");return;}
-    const double hostMs=probe.Split();
+    // Same-frame mode asks and waits right here, so the answer belongs to the frame just captured.
+    // Pipelined mode collected the previous present's answer before SyncControls and posts this
+    // frame further down, after that answer has been composed -- the helper writes into one output
+    // texture, so it must not be given new work until the last result has left it.
+    x86bridge::Ack a{};x86bridge::Frame answeredFrame{};bool answered=false;
+    if(g.async){
+        // Two ways an answer can outlive what it describes, and Confirmed catches neither, because
+        // the answer agrees with the frame that asked -- it is the world underneath that moved.
+        // A resize leaves it describing a back buffer that no longer exists. A rebuild in
+        // BuildRemote above, which happens between the post and here, increments the generation and
+        // replaces g.output, so the result was written into the texture that has just been retired.
+        // Drop it either way: the cost is one original frame, against composing a stale or
+        // mismatched surface.
+        if(havePending&&g.pendingFrame.generation==g.generation&&g.pendingWidth==width&&g.pendingHeight==height){
+            a=pendingAck;answeredFrame=g.pendingFrame;answered=true;
+        }else if(havePending)Log("x86bridge pipelined frame %llu dropped: generation %llu->%llu raster %ux%u->%ux%u",
+            static_cast<unsigned long long>(g.pendingFrame.id),
+            static_cast<unsigned long long>(g.pendingFrame.generation),static_cast<unsigned long long>(g.generation),
+            g.pendingWidth,g.pendingHeight,width,height);
+    }else{
+        if(!x86bridge::Request(g.pipe.value,g.process.value,x86bridge::Kind::Frame,&f,sizeof(f),a)||a.generation!=f.generation||a.frame!=f.id){Fault("frame reply failed/mismatched");return;}
+        answeredFrame=f;answered=true;
+    }
+    const double requestMs=probe.Split();
     g.reset=false;
-    if(a.result==x86bridge::Result::Error){Fault("host error");return;}
-    if(x86bridge::Confirmed(a,f,g.transport)){
+    if(answered&&a.result==x86bridge::Result::Error){Fault("host error");return;}
+    if(answered&&x86bridge::Confirmed(a,answeredFrame,g.transport)){
         if(FAILED(g.game11->GetDeviceRemovedReason())){Fault("D3D11 device removed");return;}
         g.game11ctx->CopyResource(g.stageOut11.Get(),g.output.on11.Get());
         if(g.nativeD3D9){
@@ -1218,8 +1326,15 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
             if(!FlushAndWait11()){Fault("return D3D11 queue not drained");return;}
         }
         g.game11ctx->Flush();
-        probe.Keep(inputMs,hostMs,probe.Split());
-    }else if(a.result!=x86bridge::Result::Original){Fault("unexpected presentation status");return;}
+        probe.Keep(inputMs,collectMs+requestMs,probe.Split());
+    }else if(answered&&a.result!=x86bridge::Result::Original){Fault("unexpected presentation status");return;}
+    // Hand this frame over last, so the helper starts on it while the game builds the next one.
+    // Everything the helper reads was drained above and everything it writes has just been consumed,
+    // so a single set of textures is enough and no extra copy is introduced to allow the overlap.
+    if(g.async){
+        if(!x86bridge::Post(g.pipe.value,g.process.value,x86bridge::Kind::Frame,&f,sizeof(f))){Fault("pipelined frame post failed");return;}
+        g.pendingFrame=f;g.pendingWidth=width;g.pendingHeight=height;g.pending=true;
+    }
     if(g.frame<=3||g.frame%120==0)Log("x86bridge frame=%llu result=%u same_frame=1 depth=%u motion=%u",f.id,static_cast<unsigned>(a.result),f.depthValid,f.motionValid);
     if(probe.Due()){
         const double n=static_cast<double>(probe.frames);

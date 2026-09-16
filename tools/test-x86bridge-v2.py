@@ -82,7 +82,14 @@ assert front.count('SyncControls()')==2 # definition + OnPresent call
 assert front.index('if(!SyncControls()')<front.index('Kind::Frame,&f')
 for name in ['Silent Hill','Resident Evil','God of War','GTA V','NFS','ProfileForThisProcess','kTargets']:
  assert name not in ui+front+h,name
-assert 'Async previous-frame presentation is not implemented' in ui
+# The panel must describe what the bridge actually does, and must read the real flag rather than a
+# shadow field that could drift from it. Read-only on purpose: the setting changes what the
+# effect guarantees, so it lives in the ini.
+assert 'Set with Async in dlss5-neural.ini' in ui and 'int timing=::g.async?1:0;' in ui
+# The panel must not promise smearing the implementation cannot produce: the back buffer is
+# replaced whole, so a pipelined frame is the previous one finished, never a mix of two.
+assert 'It does not smear' in ui and 'smearing when the camera turns' not in ui
+assert 'ImGui::BeginDisabled();' in ui[ui.index('int timing=')-200:ui.index('int timing=')+400]
 assert 'ImGui::IsItemDeactivated()' in ui and 'editingScaleActive' in ui
 assert 'g.inlineMode.store(true)' in h and 'LoadSettings();ForceInline();' in h
 assert 'register_overlay("DLSS Neural Rendering (AMD)",OnOverlay32)' in front

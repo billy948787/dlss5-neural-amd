@@ -546,12 +546,21 @@ void Draw()
         // Same-frame timing is what turns every other cost into a stall, so it is coloured
         // exactly when there is a cost big enough for that to matter.
         const float sc=g.scale.load();
-        int timing=0;
+        // Reads the frontend's own flag rather than a shadow field, so it cannot drift from what
+        // the bridge is actually doing. Still read-only: this is set in the ini, because it
+        // changes what the effect guarantees rather than how it looks.
+        int timing=::g.async?1:0;
         ImGui::BeginDisabled();
         ImGui::Combo(T("Timing", "Momento"), &timing, "Same frame (inline)\0Async (previous frame)\0");
         ImGui::EndDisabled();
-        Help("Async previous-frame presentation is not implemented by the x86 process bridge yet.",
-             "Apresentação assíncrona do quadro anterior ainda não foi implementada no bridge x86.");
+        Help("Set with Async in dlss5-neural.ini. Async posts the frame and composes the answer in "
+             "the next present, so the helper works while the game builds its next frame. It is "
+             "faster and it costs one frame of lag. It does not smear: the whole picture is replaced, "
+             "so you see the previous frame finished rather than a mix of two.",
+             "Definido por Async no dlss5-neural.ini. No modo assíncrono o quadro é enviado e a "
+             "resposta é composta no present seguinte, então o ajudante trabalha enquanto o jogo "
+             "monta o próximo quadro. É mais rápido e custa um quadro de atraso. Não borra: a imagem "
+             "inteira é substituída, então você vê o quadro anterior pronto, não uma mistura de dois.");
         // Preview while dragging, but commit only once when the edit ends. Re-staging the
         // network raster on every mouse movement leaves retired runtime/driver allocations
         // resident and can quickly exhaust VRAM.

@@ -28,9 +28,11 @@ assert 'x86bridge::StartupTimeoutMs' in f
 # All protocol fields have explicitly sized scalar or packed protocol types.
 for body in re.findall(r'struct \w+\s*\{(.*?)\};',ipc,re.S):
  assert not re.search(r'\b(?:bool|size_t|HANDLE|uintptr_t|intptr_t|long|double)\b|\*|std::string',body),body
-# The normal return never references the shared output before same-frame confirmation.
+# The normal return never references the shared output before the answer is confirmed. The frame
+# that answer belongs to is the one just captured in same-frame mode and the one posted by the
+# previous present in pipelined mode, which is why the confirmation names answeredFrame.
 present=f[f.index('void OnPresent('):f.index('\n}\nextern "C"')]
-assert present.index('CopyResource(g.stageIn11')<present.index('CopyResource(g.colour.on11')<present.index('FlushAndWait11()')<present.index('Kind::Frame,&f')<present.index('Confirmed(a,f,g.transport)')<present.index('CopyResource(g.stageOut11')<present.index('CopyResource(bb.Get(),g.stageOut11')
+assert present.index('CopyResource(g.stageIn11')<present.index('CopyResource(g.colour.on11')<present.index('FlushAndWait11()')<present.index('Kind::Frame,&f')<present.index('Confirmed(a,answeredFrame,g.transport)')<present.index('CopyResource(g.stageOut11')<present.index('CopyResource(bb.Get(),g.stageOut11')
 assert present.index('UploadD3D9Frame(bb9.Get())')<present.index('Kind::Frame,&f')<present.index('DownloadD3D9Frame(bb9.Get())')
 assert present.count('DeferD3D9Failure(')==2 and present.count('FaultHresult(')==2
 recover_start=f.index('bool DeferD3D9Failure(')
@@ -71,10 +73,43 @@ sp=f[f.index('struct StageProbe'):f.index('} probe;')]
 assert 'bool on=false;' in sp and 'QueryPerformanceFrequency' in sp and 'QueryPerformanceCounter' in sp
 for unsafe in ['FlushAndWait','CreateQuery','Issue(','GetData(','Sleep(','ClearState(','Request(','Flush()','Map(','CopyResource']:
  assert unsafe not in sp,unsafe
-# Only a frame that reached the game again is a sample, and it is counted once.
-assert present.count('probe.Keep(')==1 and present.count('probe.Begin()')==1 and present.count('probe.Split()')==3
-assert present.index('probe.Begin()')<present.index('inputMs=probe.Split()')<present.index('Kind::Frame,&f')
-assert present.index('Kind::Frame,&f')<present.index('hostMs=probe.Split()')<present.index('Confirmed(a,f,g.transport)')<present.index('probe.Keep(')
+# Only a frame that reached the game again is a sample, and it is counted once. Two marks and four
+# splits now: the wait for a pipelined answer happens before SyncControls, far from the wait a
+# same-frame request makes, and the reported host cost is the sum so both modes stay comparable.
+assert present.count('probe.Keep(')==1 and present.count('probe.Begin()')==2 and present.count('probe.Split()')==4
+assert present.index('probe.Begin()')<present.index('collectMs=probe.Split()')<present.index('SyncControls()')
+assert present.index('inputMs=probe.Split()')<present.index('Kind::Frame,&f')<present.index('requestMs=probe.Split()')
+assert present.index('requestMs=probe.Split()')<present.index('Confirmed(a,answeredFrame,g.transport)')<present.index('probe.Keep(')
+assert 'probe.Keep(inputMs,collectMs+requestMs,probe.Split())' in present
+# Pipelining is the default, and Async=0 has to keep restoring same-frame presentation: the
+# guarantee it gives up is deliberate, so the escape hatch is part of the contract.
+assert 'L"Async",1,ini.c_str()' in f
+# The pipe carries one conversation. A posted frame must be collected before anything else uses the
+# pipe, or its answer is delivered into an unrelated call: hence before SyncControls, which talks
+# every present, and before OnDestroy touches DropRemote or Quit.
+assert present.index('CollectPending(pendingAck,havePending)')<present.index('SyncControls()')
+destroy_sc=f[f.index('void OnDestroy('):f.index('void OnDestroyDevice(')]
+assert destroy_sc.index('CollectPending(')<destroy_sc.index('DropRemote()')
+assert destroy_sc.index('CollectPending(')<destroy_sc.index('ReleaseLocal()')
+# One output texture, so the helper may not be given new work until the last result has left it.
+assert present.index('Confirmed(a,answeredFrame,g.transport)')<present.index('x86bridge::Post(')
+assert present.count('x86bridge::Post(')==1
+# Every fault path runs StopHost, so clearing the outstanding frame there is what keeps them safe.
+assert 'g.pending=false;' in f[f.index('void StopHost()'):f.index('void Fault(')]
+# An answer can outlive what it describes in two ways that Confirmed cannot see, because the answer
+# does agree with the frame that asked for it: a resize, and a rebuild in BuildRemote, which runs
+# between the post and the compose and replaces the output texture the result was written into.
+assert 'g.pendingFrame.generation==g.generation&&g.pendingWidth==width&&g.pendingHeight==height' in present
+assert present.index('BuildRemote()')<present.index('g.pendingFrame.generation==g.generation')
+# The present-period sample is what the pipelining estimate needs, so it has to keep measuring
+# while the effect is off: it sits before the early-outs rather than beside the stage splits, and
+# it is read once per present. A window that spans a toggle is thrown away, because averaging the
+# effect's frames together with the game's own would answer neither question.
+assert present.count('probe.Present(g.enabled)')==1
+assert present.index('probe.Present(g.enabled)')<present.index('if(g.active&&g.active!=sc)return;')
+assert present.index('probe.Present(g.enabled)')<present.index('probe.Begin()')
+assert 'effectOn==periodEffect' in sp and 'periodFrames=0;periodEffect=effectOn;' in sp
+assert 'kPeriodOutlierMs' in sp
 # The rejected classic-D3D9 raster experiment must not come back with it.
 for word in ['FrameFlagClassicD3D9','EfficientClassicD3D9Scale','D3D9 timing avg']:
  assert word not in f,word
