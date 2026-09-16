@@ -23,7 +23,9 @@ inline short GetAsyncKeyState(int){return 0;}
 inline uint64_t GetTickCount64(){return 0;}
 struct Ptr{void* Get()const{return nullptr;}};
 struct Guide{Ptr chosen;unsigned width=0,height=0,format=0;bool ready=false;};
-struct Front{std::mutex lock;Guide guideDepth,guideMotion;bool failed=false;}g;
+// async is here because the Timing combo reads the frontend's real flag rather than a shadow
+// field, so this stub has to carry every member the overlay touches on the frontend global.
+struct Front{std::mutex lock;Guide guideDepth,guideMotion;bool failed=false,async=false;}g;
 // Stand-in for neural/hotkey_capture.h, which is Windows-only. The overlay touches two
 // members of it, and this is a syntax check, so those two are what it needs to see.
 namespace hotkey{struct Capture{bool armed=false;void Toggle(){}};}
