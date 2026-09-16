@@ -1059,10 +1059,9 @@ void OnDestroy(swapchain* sc,bool resize){
 // Release point for a game that never delivers destroy_swapchain.
 //
 // Everything this add-on holds is released in OnDestroy, and only there. A game that leaves through
-// ExitProcess rather than shutting its renderer down never delivers that callback: GTA IV and
-// Silent Hill 3 both end without it, which is why neither log ever carries "retiring swapchain
-// resize=0" -- Log() flushes every line, so an absent line is code that did not run rather than a
-// buffer that was lost. ReShade then finds its device still referenced and writes "Reference count
+// ExitProcess rather than shutting its renderer down never delivers that callback, which is why
+// such a log never carries "retiring swapchain resize=0" -- Log() flushes every line, so an absent
+// line is code that did not run rather than a buffer that was lost. Handoff 4.6 names the games. ReShade then finds its device still referenced and writes "Reference count
 // for IDirect3DDevice9 ... is inconsistent! Leaking resources".
 //
 // The reference is real and it is ours. ComPtr AddRefs the game's own device on both routes --
