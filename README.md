@@ -430,7 +430,7 @@ the display driver down, so nothing happens until you have seen what it is set t
 | | |
 |---|---|
 | **Enabled from the first frame** | The effect is on when the game opens, instead of waiting for a keypress. For a game that is a chore to get back into, set it once. `StartOn=1`. |
-| **Toggle hotkey** | `Ctrl+End` is only the default. Click the key button, press the combination you want, Save. `ToggleKey` and `ToggleMods` in the ini; the panel writes both for you. |
+| **Toggle hotkey** | `Ctrl+End` is only the default. Click the key button and press the combination you want; it is kept on its own. `ToggleKey` and `ToggleMods` in the ini; the panel writes both for you. |
 | **Disable the effect on alt-tab** | Switches the effect off the moment the game stops being the window in front, and leaves it off — you turn it back on with the hotkey. `DisableOnAltTab=1`. Separate from the minimised-window handling, which is always on and does resume by itself. |
 
 The add-on also writes a **commented `dlss5-neural.ini`** when there isn't one, so the file
@@ -512,9 +512,11 @@ separated it from its default, `UNKNOWN` means a real engine field whose effect 
 established, `INERT` means swept and measured to change nothing. The legend is at the bottom of
 the panel.
 
-**Save Settings** writes everything to `dlss5-neural.ini` next to the exe; without it the panel
-is a scratchpad. **Language** switches the whole panel, tooltips included, between English and
-Brazilian Portuguese.
+**The panel saves itself.** Every control is written to `dlss5-neural.ini` next to the exe the
+moment you let go of it, so nothing is lost by closing a game. **Save Settings** is still there,
+and it is what puts a line in the log saying a write happened. The write is armed when a control
+settles rather than while it is being dragged, because the whole file is rewritten once per key.
+**Language** switches the whole panel, tooltips included, between English and Brazilian Portuguese.
 
 ### The Experimental tab
 

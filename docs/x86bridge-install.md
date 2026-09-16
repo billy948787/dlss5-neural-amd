@@ -16,9 +16,10 @@ Open `release/dlss5-installer.exe` -- one installer for both architectures since
 ## Defaults and UI
 
 - Fresh install only: ColourStrength=0.25, Structure=1, Skin=1, Passes=1. Other values follow upstream; Scale=1 matches original EnsureNeuralIni. Existing dlss5-neural.ini stays byte-identical.
-- Host captures constructed upstream settings before LoadSettings. Factory Defaults restores that memory snapshot with the five x86 overrides, including inline=1; it does not save. Constructed Scale is 0.5, whereas upstream fresh INI sets Scale=1; this original distinction is preserved.
+- Host captures constructed upstream settings before LoadSettings. Factory Defaults restores that memory snapshot with the five x86 overrides, including inline=1; it writes nothing itself, and the overlay's autosave carries it to the ini on the next frame like any other change. Constructed Scale is 0.5, whereas upstream fresh INI sets Scale=1; this original distinction is preserved.
 - Factory preserves Enabled, StartOn, hotkey/modifiers, alt-tab preference and language. It leaves restart-only diagnostics alone and invalidates history once when temporal/guide switches change.
 - Save and Reload retain their previous semantics. Factory uses CommandCode=2 in protocol v2; all wire sizes and frame messages are unchanged. Only SyncControls in Present sends it; overlay sets a pending flag.
+- Autosave arms the same pending Save flag, from the overlay, when `shadow.settings_revision` has moved past `savedRevision` and no ImGui item is active. No new wire message: the write is the Save the host already implements, requested by the overlay instead of by a button. `savedRevision` follows `sentRevision` on the first sync, on a successful Save and on Reload, and deliberately does not on SetState or Factory — those change memory only.
 
 ## Docking
 

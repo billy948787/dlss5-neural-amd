@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.5.2 - 2026-09-15 - The overlay saves itself
+
+Same pinned **DLSS-NR-on-AMD v0.3.0** runtime and the same weights as v0.5.1, so an upgrade is the
+three add-on files and nothing else — the 141 MB does not move.
+
+- **The overlay saves itself.** Every control now writes to `dlss5-neural.ini` the moment you let
+  go of it, on both the 64-bit route and the 32-bit bridge. Save Settings stays — it is still what
+  puts a line in the log saying a write happened — but nothing is lost to closing a game without
+  having scrolled down to it, which is where half a dozen A/B tests went. The write is armed when a
+  control settles rather than while it is being dragged: `WritePrivateProfileString` rewrites the
+  whole file once per key, so a held slider would otherwise be fifty full rewrites a second.
+  Factory Defaults now lands in the ini with everything else instead of asking for a Save after it.
+- Keep every ini key in one list, which the writer and the change check both read. Two lists would
+  drift, and a setting in one but not the other is a control that quietly stops being saved.
+
 ## v0.5.1 - 2026-09-15 - The hotkey, depth, and not taking the driver down
 
 Requires the pinned **DLSS-NR-on-AMD v0.3.0** runtime; v0.2.14 and v0.2.17 are both refused by

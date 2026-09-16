@@ -245,7 +245,7 @@ struct Controls32 {
     // Stamped by the overlay callback, the only place ReShade hands a runtime over. The key
     // scan runs on the present path and needs it to read ReShade's own key state.
     effect_runtime* runtime=nullptr;
-    uint64_t sentRevision=0,commandId=0,lastStatusAt=0,overlayAt=0;
+    uint64_t sentRevision=0,savedRevision=0,commandId=0,lastStatusAt=0,overlayAt=0;
 } controls;
 void OperationalSettings(){
     const auto& s=controls.shadow;
@@ -972,13 +972,16 @@ bool SyncControls(){
         const bool requestedEnable=g.enabled;
         if(!StateRequest(Kind::GetState,nullptr,0,true))return false;
         if(controls.preSyncEnableChanged&&requestedEnable!=g.enabled){g.enabled=requestedEnable;g.reset=true;OperationalChanged();}
-        controls.syncRequested=false;controls.preSyncEnableChanged=false;
+        controls.syncRequested=false;controls.preSyncEnableChanged=false;controls.savedRevision=controls.sentRevision;
     }
     if(controls.shadow.settings_revision!=controls.sentRevision){
         if(!StateRequest(Kind::SetState,&controls.shadow,sizeof(controls.shadow),true))return false;
     }
-    if(controls.save){if(!StateRequest(Kind::SaveSettings))return false;controls.save=false;}
-    if(controls.reload){if(!StateRequest(Kind::ReloadSettings,nullptr,0,true))return false;controls.reload=false;}
+    // savedRevision marks what is on disk. The SetState above has already pushed this revision to the
+    // host, so a save that succeeds here writes exactly it -- and Factory Defaults, which only changes
+    // memory, deliberately leaves this behind so the overlay's autosave picks it up next frame.
+    if(controls.save){if(!StateRequest(Kind::SaveSettings))return false;controls.save=false;controls.savedRevision=controls.sentRevision;}
+    if(controls.reload){if(!StateRequest(Kind::ReloadSettings,nullptr,0,true))return false;controls.reload=false;controls.savedRevision=controls.sentRevision;}
     if(controls.factory){x86bridge::WireCommand c;c.id=++controls.commandId;c.code=x86bridge::CommandCode::FactoryDefaults;
         if(!StateRequest(Kind::Command,&c,sizeof(c),true))return false;controls.factory=false;}
     if(controls.measure){x86bridge::WireCommand c;c.id=++controls.commandId;

@@ -1313,12 +1313,12 @@ void Draw()
     if (ImGui::Button(T("Save Settings", "Salvar Ajustes")))
         controls.save=true;
     Help("Writes everything above to dlss5-neural.ini next to the exe, so it survives a restart.\n\n"
-         "Without this the overlay is a scratchpad: every A/B test meant re-dialling half a dozen "
-         "controls by hand on the next run.",
+         "You do not have to press it: every control saves itself the moment you let go of it. This "
+         "is here to write now, and to put a line in the log saying it happened.",
 
          "Escreve tudo acima no dlss5-neural.ini ao lado do exe, para sobreviver a um restart.\n\n"
-         "Sem isto o overlay é um rascunho: cada teste A/B significava re-ajustar meia dúzia de "
-         "controles na mão na execução seguinte.");
+         "Você não precisa apertar: cada controle se salva sozinho assim que você solta. Isto serve "
+         "para escrever agora, e para deixar uma linha no log dizendo que aconteceu.");
     ImGui::SameLine();
     if (ImGui::Button(T("Reload Settings", "Recarregar Ajustes")))
     {
@@ -1329,8 +1329,8 @@ void Draw()
          "Relê o dlss5-neural.ini, descartando qualquer coisa mudada aqui desde o último salvamento.");
     ImGui::SameLine();
     if(ImGui::Button(T("Factory Defaults", "Padrões de Fábrica")))controls.factory=true;
-    Help("Restore factory tuning in memory. Enabled, startup, hotkey and language are preserved. Press Save to persist.",
-         "Restaura ajustes de fábrica na memória. Ligado, inicialização, atalho e idioma são preservados. Aperte Salvar para persistir.");
+    Help("Restore factory tuning. Enabled, startup, hotkey and language are preserved. It lands in the ini with everything else, on its own.",
+         "Restaura ajustes de fábrica. Ligado, inicialização, atalho e idioma são preservados. Vai para o ini junto com o resto, sozinho.");
 }
 } // namespace overlay32
 void OverlayCandidateStatus(){
@@ -1358,4 +1358,9 @@ void OnOverlay32(effect_runtime* runtime){
     if(std::memcmp(&edited,&controls.shadow,sizeof(edited))!=0){
         edited.settings_revision=controls.shadow.settings_revision+1;controls.shadow=edited;OperationalSettings();
     }
+    // Autosave. Armed when a control settles rather than while it is being dragged: the host rewrites
+    // the whole ini once per key, so a slider held down would be a file rewrite per frame. The Save
+    // button stays -- it is what puts the line in the host's log -- but nothing is lost without it.
+    if(controls.shadow.settings_revision!=controls.savedRevision&&!ImGui::IsAnyItemActive())
+        controls.save=true;
 }

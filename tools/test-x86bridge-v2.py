@@ -27,7 +27,7 @@ struct Front{std::mutex lock;Guide guideDepth,guideMotion;bool failed=false;}g;
 // Stand-in for neural/hotkey_capture.h, which is Windows-only. The overlay touches two
 // members of it, and this is a syntax check, so those two are what it needs to see.
 namespace hotkey{struct Capture{bool armed=false;void Toggle(){}};}
-struct Controls{x86bridge::WireSettings shadow;x86bridge::WireStatus status;uint64_t overlayAt=0;bool synced=false,syncRequested=false,save=false,reload=false,factory=false,measure=false,capturing=false,preSyncEnableChanged=false;hotkey::Capture capture;effect_runtime* runtime=nullptr;}controls;
+struct Controls{x86bridge::WireSettings shadow;x86bridge::WireStatus status;uint64_t overlayAt=0,savedRevision=0;bool synced=false,syncRequested=false,save=false,reload=false,factory=false,measure=false,capturing=false,preSyncEnableChanged=false;hotkey::Capture capture;effect_runtime* runtime=nullptr;}controls;
 void OperationalSettings(){}
 #include "overlay32.inc"
 '''
@@ -74,6 +74,10 @@ ui=read(n/'overlay32.inc');front=read(n/'frontend32.cpp')
 for call in ['Request(', 'ReadFile(', 'WriteFile(', 'WaitFor', 'FlushAndWait', 'StartHost(', 'StateRequest(', 'SyncControls(', 'SaveSettings(', 'LoadSettings(']:
  assert call not in ui,call
 assert 'std::try_to_lock' in ui and 'controls.save=true' in ui and 'controls.reload=true' in ui and 'controls.measure=true' in ui
+# Autosave: armed only once a control has settled, and only against what is already on disk. Without
+# the IsAnyItemActive guard a held slider is one whole-file rewrite per frame.
+assert 'controls.shadow.settings_revision!=controls.savedRevision&&!ImGui::IsAnyItemActive()' in ui
+assert front.count('controls.savedRevision=controls.sentRevision')==3 # first sync, save, reload
 assert front.count('SyncControls()')==2 # definition + OnPresent call
 assert front.index('if(!SyncControls()')<front.index('Kind::Frame,&f')
 for name in ['Silent Hill','Resident Evil','God of War','GTA V','NFS','ProfileForThisProcess','kTargets']:
