@@ -43,12 +43,25 @@ assert 'g.game11ctx->ClearState()' in f
 # D3D9 Reset is already in progress when ReShade emits destroy_swapchain. Its resize branch must
 # release default-pool resources without IPC, submitting queries or waiting on either GPU. Remote
 # retirement is deferred until Bridge::Ensure runs from the next stable presentation.
-destroy=f[f.index('void OnDestroy('):f.index('void OnPresent(')]
+destroy=f[f.index('void OnDestroy('):f.index('void OnDestroyDevice(')]
 d3d9_reset=destroy[destroy.index('if(resize&&g.nativeD3D9)'):destroy.index('\n    }',destroy.index('if(resize&&g.nativeD3D9)'))]
 assert 'ReleaseLocal();' in d3d9_reset and 'return;' in d3d9_reset
 for unsafe in ['DropRemote(', 'FlushAndWait9(', 'FlushAndWait11(', 'ClearState(', 'Flush(']:
  assert unsafe not in d3d9_reset,unsafe
 assert destroy.index('if(resize&&g.nativeD3D9)')<destroy.index('DropRemote();')
+# A game that leaves through ExitProcess never delivers destroy_swapchain, and everything this
+# add-on holds is released there. Without a second release point ReShade finds its own device still
+# referenced -- ComPtr AddRefs the game's device on both routes -- and reports leaked resources.
+# destroy_device is the last callback before the device goes, and it is not under the loader lock.
+assert 'addon_event::destroy_device>(OnDestroyDevice)' in f
+gone=f[f.index('void OnDestroyDevice('):f.index('void OnPresent(')]
+assert 'g.game9.Reset()' in gone and 'g.game11.Reset()' in gone and 'ReleaseLocal();' in gone
+# It must act only on the device it actually holds, never on another one being torn down.
+assert 'native!=ours' in gone and 'g.nativeD3D9?' in gone
+# And issue no GPU work: the device is already going away, the same rule the reset branch follows.
+for unsafe in ['FlushAndWait','ClearState(','->Flush()','CopyResource','Kind::Quit','x86bridge::Request']:
+ assert unsafe not in gone,unsafe
+
 assert 'const std::wstring name=L"\\\\\\\\.\\\\pipe\\\\dlss5-x86bridge-"' in f
 # The stage probe measures; it must never participate. It stays off unless the environment asks
 # for it, and it may only read boundaries the frame already crosses -- a wait of its own would

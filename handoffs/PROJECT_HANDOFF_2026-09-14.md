@@ -284,27 +284,55 @@ and does not pay it. That is the measured case for D3D9Ex promotion over saving 
 How much of the 5.5 ms D3D9Ex actually removes is still unmeasured; the probe labels the staging
 path on its own line, so a promoted Silent Hill 3 answers it directly.
 
-### 4.6 Open: D3D9 reference count at process exit
+### 4.6 The device reference held past the last callback
 
-ReShade reports `Reference count for IDirect3DDevice9 ... is inconsistent! Leaking resources` at
-normal process exit on Silent Hill 3 and GTA IV, and not on Half-Life 2. No crash or minidump is
-associated with it. The correlation across the three titles is clean:
+ReShade reported `Reference count for IDirect3DDevice9 ... is inconsistent! Leaking resources` at
+normal process exit on Silent Hill 3 and GTA IV, and not on Half-Life 2. It was recorded here as
+unconfirmed, with the classic CPU staging path as the suspect. **Both of those were wrong, and the
+evidence to settle it was already in the logs.**
 
-| Title | Staging | Final `destroy_swapchain` observed | Reference count |
-|---|---|---|---|
-| Silent Hill 3 | classic CPU-compatible | no | inconsistent |
-| GTA IV | classic CPU-compatible | no | inconsistent |
-| Half-Life 2 | shared GPU | yes | clean |
+`Log()` calls `fflush` on every line, so a line that is not in a log is code that did not run rather
+than a buffer that was lost. `x86bridge retiring swapchain resize=0` is absent from Silent Hill 3
+and GTA IV and present in Half-Life 2. The two games that leak are the two that never delivered
+`destroy_swapchain`, and that is the whole correlation -- the staging path had nothing to do with it.
 
-On GTA IV the warning is timestamped two seconds before the add-on is unregistered, so ReShade
-released the device while the frontend still held references. The classic path is the one that
-creates `readback9` and `upload9`, two `SYSTEMMEM` surfaces the shared path never creates, which
-makes them the first thing to check. A plausible fix direction is to release the D3D9 staging on
-add-on unregister as well, not only in `destroy_swapchain`.
+What leaks is not `readback9` and `upload9`. It is the device itself. `ComPtr` AddRefs the game's own
+device on both routes: `g.game9` on D3D9, and on D3D11 `g.game11` is the game's device rather than a
+private one. Every D3D9 staging texture and surface made from it holds a reference as well. All of
+them were released in exactly one place, the `resize=0` branch of `OnDestroy`, and a game that
+leaves through `ExitProcess` rather than shutting its renderer down never reaches it.
 
-Treat this as unconfirmed. All three frontend logs end abruptly, so the missing teardown line may
-be an unflushed log rather than a callback that never ran; the reference-count warning itself comes
-from ReShade and is independent of that.
+**Subscribing to `destroy_device` does not fix it, and nothing in an add-on can.** The handler is in
+place and is correct, but it never runs. Measured 2026-09-16 with an unconditional `Log()` at the
+very top of the handler, before the identity check, in a build proved live by `probe=on` in the same
+log: **it printed nothing, in GTA IV or in Half-Life 2**, while both runs ended with the warning.
+ReShade simply does not deliver the event when a game leaves through `ExitProcess`. Neither does it
+deliver `destroy_swapchain` or `destroy_effect_runtime` on that path.
+
+ReShade's own log shows why there is no workaround. At exit it releases the device, checks, and warns
+**while the add-on is still loaded and still holding the reference**; it unloads the add-on
+afterwards:
+
+```
+13:17:36:980  WARN  | Reference count for IDirect3DDevice9 object 240DAF08 is inconsistent! ...
+13:17:38:861  INFO  | Unregistered add-on "dlss5 neural x86 bridge".
+```
+
+Two seconds separate them, in that order. There is no add-on-side moment between the last frame and
+that check, and `DLL_PROCESS_DETACH` is later still, so it cannot help even setting aside the loader
+lock. Half-Life 2 behaves identically once it exits the same way -- the earlier run where it stayed
+clean was a clean renderer shutdown, not a property of D3D9Ex.
+
+**This is cosmetic and should be left alone.** The warning is written as the process is dying and the
+OS reclaims every handle regardless; nothing survives the exit and no session is affected. The
+handler stays because it is free and correct for any game that does shut its renderer down, but it
+should not be described as a fix, and the warning should not be chased further from this side. If it
+is ever worth removing, that is an upstream request for ReShade to emit `destroy_device` on this
+path.
+
+The contract test pins the handler's shape: that the event is subscribed, that it releases both
+devices, that it compares device identity before touching anything, and that it contains no
+`FlushAndWait`, `ClearState`, `Flush`, `CopyResource` or IPC.
 
 ## 5. D3D8 and Silent Hill 3 details
 
@@ -558,17 +586,128 @@ None of this stops a game from running. It is collected here so it stays visible
 rediscovered, and ordered by what the evidence says is worth doing first rather than by how easy it
 would be.
 
-### Worth doing first, because it is measured
+### The classic D3D9 transport cost, and why D3D9Ex does not fix it
 
-**Promote the classic D3D9 route to D3D9Ex.** Section 4.5 puts the transport at 5.55 ms a frame,
-measured, and independent of the neural cost: `host` swung 4.1x across the same run while transport
-moved half a millisecond. That is roughly 36% of a 60 FPS budget spent only moving pixels, and it
-does not shrink when Resolution Scale drops, so the route has a floor no tuning reaches. Half-Life 2
-already takes the shared-GPU path and does not pay it.
+**The cost is real and measured.** Section 4.5 puts the transport at 5.55 ms a frame on the classic
+D3D9 path, independent of the neural cost: `host` swung 4.1x across one run while transport moved
+half a millisecond. That is roughly 36% of a 60 FPS budget spent only moving pixels, and it does not
+shrink when Resolution Scale drops. Half-Life 2 does not pay it, because Source creates a D3D9Ex
+device and the bridge takes the shared-GPU path there.
 
-How much of the 5.55 ms this actually recovers is unmeasured. The probe names the staging path on
-its own line, so a promoted title answers it directly. For D3D8 it depends on what d3d8to9 creates,
-which is the part to establish first.
+**Promoting the game's device to D3D9Ex was the obvious fix. It does not work.** Measured on this
+machine, RX 9070 XT, with `tools/d3d9ex-probe.cpp`:
+
+| | plain D3D9 | D3D9Ex |
+|---|---|---|
+| `CreateTexture` `D3DPOOL_MANAGED` | OK | **`D3DERR_INVALIDCALL`** |
+| `CreateTexture` `D3DPOOL_DEFAULT` | OK | OK |
+| `LockRect` on a DEFAULT texture | `D3DERR_INVALIDCALL` | `D3DERR_INVALIDCALL` |
+| `D3DPOOL_DEFAULT` + `D3DUSAGE_DYNAMIC`, then `LockRect` | OK | OK |
+| `CreateTexture` with a shared handle | **`D3DERR_INVALIDCALL`** | OK |
+| `QueryInterface` for `IDirect3DDevice9Ex` | `E_NOINTERFACE` | OK |
+
+Both halves are confirmed. A plain D3D9 device cannot produce the shared texture the fast path
+needs, so there is no way to reach it without promotion. And a D3D9Ex device refuses
+`D3DPOOL_MANAGED`, which is what a legacy D3D9 or translated D3D8 game creates nearly all of its
+textures in.
+
+So promotion means intercepting device creation *and* every resource creation, translating MANAGED
+to DEFAULT, and dealing with what that breaks. The probe shows the shape of that: a DEFAULT texture
+cannot be locked, so every translated texture the game intends to lock has to become DYNAMIC, which
+changes where the driver places it and what it costs to sample. That is a resource-translation
+layer with a per-resource policy — what dgVoodoo and DXVK are — and this project deliberately
+removed its dgVoodoo dependency.
+
+**Do not attempt blanket promotion.** It fails in the games it is meant to help, and it fails after
+the install rather than at it.
+
+### Why lowering Resolution Scale drops GPU load without raising FPS
+
+Measured in GTA IV, 2026-09-16, classic D3D9 staging, one session that walked Resolution Scale
+1.00 -> 0.50 -> 0.25 -> 0.50 -> 1.00. The user's report was that FPS did not move while GPU
+utilisation fell. Both halves of that are explained, and the scale control is not at fault.
+
+**The scale change reaches the network.** `dlssnr_on_amd.log` rebuilds its staging at each step --
+`staging ready: colour 1920x1080`, then `960x540`, then `480x270` -- and the per-job cost follows:
+
+| Network raster | network, avg of 200 jobs | game queue `spin waiting on us` |
+|---|---|---|
+| 1920x1080 | 26.2 - 29.5 ms (41.6 late, heavy scene) | matches within 0.3 ms |
+| 960x540 | 16.6 - 16.7 ms | 16.8 ms |
+| 480x270 | ~10.0 ms | (segment too short for an average) |
+
+**The game is blocked for the whole of it.** In every single timing line `spin waiting on us` equals
+`network` to within 0.3 ms. Nothing overlaps: the neural cost is fully serialized into the frame, so
+frame time can never fall below it. That is the same serialization the async item further up
+describes, seen from the host side.
+
+**But the transport does not scale, and it is measured.** The bridge log names one raster for the
+whole session and never rebuilds: `bridge: private staging 1920x1080`. Resolution Scale resizes what
+the network chews on; it does not resize the CPU round trip, which keeps moving a full 1920x1080
+frame down and back every frame. A second run with the probe armed shows exactly that -- six
+averages of 120 frames, with `host` swinging six-fold while the two transport stages do not move:
+
+| input+prepare | host | output | bridge total |
+|---|---|---|---|
+| 5.83 ms | 24.18 ms | 2.92 ms | 32.93 ms |
+| 5.16 ms | 18.72 ms | 2.92 ms | 26.79 ms |
+| 5.37 ms | **10.04 ms** | 2.92 ms | 18.33 ms |
+| 5.40 ms | 21.92 ms | 2.95 ms | 30.27 ms |
+| 5.67 ms | **59.59 ms** | 3.04 ms | 68.29 ms |
+| 5.93 ms | 45.17 ms | 3.10 ms | 54.20 ms |
+
+`input+prepare` stays inside 5.16-5.93 and `output` inside 2.92-3.10 across all of it. **Transport on
+this path is 8.3-9.0 ms per frame, call it 8.6, and no setting in the overlay reaches it.** That is
+higher than the 5.55 ms section 4.5 measured elsewhere, so 5.55 should not be quoted for GTA IV.
+The floor is therefore:
+
+- Scale 1.00: ~26.5 ms network + ~8.6 ms transport = ~35 ms, a ~29 FPS ceiling
+- Scale 0.50: ~16.8 ms network + ~8.6 ms transport = ~25 ms, a ~39 FPS ceiling
+- Transport alone, with the network free, would still cap the game at ~116 FPS
+
+The ceiling did rise. If observed FPS did not, the game was already delivering below the lower
+ceiling for its own reasons -- GTA IV is CPU-bound and carries its own limiter -- and the neural
+cost was never the binding constraint at that setting. Less GPU work with the same frame rate is
+exactly what a non-GPU limiter looks like.
+
+**The practical consequence.** On the classic D3D9 path, Resolution Scale has a hard floor of
+roughly 5.5 ms that it cannot reach, and past the point where the network drops under the game's
+own frame time it buys image quality back for nothing. Half-Life 2 does not have this floor,
+because D3D9Ex puts it on the shared path. This is a further argument for pipelining over any
+further tuning of the scale control.
+
+**Arming the probe in this game needs the ini, not the environment variable.** GTA IV re-launches
+itself through its own launcher, so the process that loads the add-on inherits nothing from whoever
+ran `tools\run-with-timing.cmd`, and the first log line reads `probe=off` however you start it. The
+frontend now also accepts `Timing=1` under `[dlss5]` in `dlss5-neural.ini`, which travels with the
+install and does not care how the game was started. The environment variable still works where it
+already worked.
+
+### What is actually left for the classic D3D9 path
+
+The 5.55 ms is 8.3 MB crossing PCIe down, 8.3 MB copied between two API allocations on the CPU, and
+8.3 MB crossing back, every frame at 1920x1080. None of those three is removable while the transport
+is a CPU round trip:
+
+- The intermediate `StretchRect` before `GetRenderTargetData` costs almost nothing by comparison —
+  a GPU-local blit of 8 MB is microseconds on this card — so removing it is not the win it looks
+  like. It also resolves multisampling, which the direct read cannot.
+- The CPU memcpy between `readback9` and the D3D11 staging texture exists because they are separate
+  allocations in separate APIs. Nothing merges them short of sharing.
+- Less data cannot be sent. The full frame is needed both as network input and to compose the
+  corrected result at full resolution.
+
+**The one option that would hide it is pipelining**, and it is not implemented: the overlay's Timing
+control says "Async previous-frame presentation is not implemented by the x86 process bridge yet".
+Today capture, network and return are serialized inside `Present`: roughly 15.5 ms of which 5.55 ms
+is transport and 10 ms is waiting for the network. Async does not hide the transport -- the capture
+and the return still happen in `Present` either way. **It hides the wait.** Frame N is handed to the
+network without waiting for it, and what is presented is frame N-1's finished result, so `Present`
+carries the 5.55 ms of copies and none of the 10 ms of inference.
+
+That costs one frame of latency and gives up the `same_frame=1` guarantee the bridge was built and
+validated around, which is a design decision rather than a fix. It is the only remaining lever of
+that size, so it is worth deciding deliberately rather than by default.
 
 **Quantify before optimising anything else.** With `DLSS5_X86BRIDGE_TIMING=1` and no frame-rate cap
 in the way, run one title at several Resolution Scales: `input+prepare` and `output` should stay
@@ -576,57 +715,33 @@ flat while only `host` grows. Section 4.2 is the record of what guessing cost la
 
 ### Open questions, not yet defects
 
-**The D3D9 reference count at process exit (4.6).** Correlates cleanly across three titles -- both
-classic-staging games leak, the D3D9Ex one does not -- with a concrete suspect in `readback9` and
-`upload9`. Explicitly unconfirmed: all three logs end abruptly, so the missing teardown line may be
-an unflushed log rather than a callback that never ran. Confirm or dismiss before acting on it.
+**The D3D9 reference count at process exit** is diagnosed and fixed; see 4.6. What is left is live
+confirmation that the warning is gone from GTA IV and Silent Hill 3.
 
 **Reliable depth on Vulkan.** A separate capture and discovery project. Do not enable a switch that
 has no real resource behind it.
 
-### Installer, after the merge
+### Installer: not this repository any more
 
-The merge itself is finished; `docs/installer-merge.md` is the record. What it deliberately left:
+`installer/` was removed in v0.5.1. Installing is **AMD-NR ReShade Installer**, which lives in its
+own repository, and `docs/installer-merge.md` is kept only for the reasoning behind what an
+installer has to check before it writes anything.
 
-**Externalise the embedded add-on.** Decision 1 of that document: all payloads external with pinned
-hashes, so coupling is proved by hash rather than by `include_bytes!`. It changes what a release
-ships, so it is worth doing on purpose rather than as a side effect.
+The items that used to sit here are resolved or moved:
 
-**Stream payloads instead of reading them whole.** The engine loads every payload into memory,
-inherited from the C++ design. The 147 MB of weights make a full round trip take about 78 seconds.
+- **Externalising the embedded add-on** is done. The new installer fetches every payload, including
+  the add-on, from Hugging Face or a manual download. Nothing is compiled into the installer any
+  more, so the coupling is proved by hash for all of it rather than by `include_bytes!` for one file.
+- **Streaming payloads instead of loading them whole** is done, by the same route. The 147 MB no
+  longer passes through memory in one piece.
+- **Tightening what the manifest proves** moved with the code. Editing `owned` or a recorded hash
+  survived the round-trip check, because both are re-encoded faithfully; the blast radius was bounded
+  by the allowed-name set and by uninstall re-hashing before it acted. If the new installer kept that
+  manifest format, it kept that property too.
+- **The Win32 GUI** went with the C++ installer and is the new installer's question, not this one's.
 
-**Tighten what the manifest proves.** Editing `owned` or a recorded hash still survives the
-round-trip check, faithfully ported from `core.h` and documented by a test that asserts the current
-behaviour rather than the desired one. The blast radius is bounded by the allowed-name set and by
-uninstall re-hashing before it acts. Changing it changes the manifest format.
-
-**The Win32 GUI.** It went with the C++ installer. `installer/Cargo.toml` already depends on
-`windows-sys`, so adding the `Win32_Graphics_Gdi` and `Win32_UI_WindowsAndMessaging` features would
-let that paint code be ported onto the same engine if the GUI is wanted back.
-
-### Portuguese in the installer
-
-Deferred past v0.5.0 on purpose: the release was verified and green, and this touches enough of the
-suite that doing it first would have meant publishing something different from what was tested.
-
-Scale, measured rather than guessed: **213 user-facing string literals in production code** --
-107 in `engine.rs`, 81 in `work.rs`, and the rest in the TUI shell and `main.rs`. Test modules
-excluded.
-
-The part that decides how it is done: **around twenty tests assert on the English text of those
-messages** -- `err.contains("PE32/x86")`, `has_err(&report, "does not match the expected SHA-256")`,
-`"open by another program"` and others. A translation has to either pin those to the English
-variant or move them to keys. Whichever, decide it before the first string moves, because doing it
-halfway leaves a suite that passes only in one language.
-
-Worth settling at the same time:
-
-- How the language is chosen. A key in the TUI is the obvious fit, and defaulting from the Windows
-  locale would mean most people never press it. It should be remembered between runs.
-- Whether the engine's refusals translate too, or stay English as diagnostics. They are what a
-  confused person reads, so translating the shell alone is the worst of both.
-- `docs/install.md` ships inside the download as its README, so a translated installer with an
-  English README is only half the job.
+Translating the installer is likewise its own repository's work. The **add-on overlay** already has
+a `Language` control, English or Brazilian Portuguese, written to `dlss5-neural.ini` as `Language=`.
 
 ### Housekeeping
 

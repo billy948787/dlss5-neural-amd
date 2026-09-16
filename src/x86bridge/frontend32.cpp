@@ -898,7 +898,14 @@ void Settings(){
     g.toggleMods=std::clamp(static_cast<int>(GetPrivateProfileIntW(L"dlss5",L"ToggleMods",1,ini.c_str())),0,7);
     g.disableAltTab=GetPrivateProfileIntW(L"dlss5",L"DisableOnAltTab",0,ini.c_str())!=0;
     wchar_t flag[8]{};g.transport=GetEnvironmentVariableW(L"DLSS5_X86BRIDGE_TRANSPORT_ONLY",flag,8)==1&&flag[0]==L'1';
-    wchar_t timingFlag[8]{};probe.Arm(GetEnvironmentVariableW(L"DLSS5_X86BRIDGE_TIMING",timingFlag,8)==1&&timingFlag[0]==L'1');
+    // The environment variable alone is not enough for every game. One that re-launches itself
+    // through its own launcher ends up loading this add-on into a process that is not a child of
+    // whatever set the variable, so it inherits nothing and run-with-timing.cmd reports probe=off
+    // there no matter what. GTA IV does exactly that.
+    // The ini is already open on the line above and travels with the install, so it always arrives.
+    wchar_t timingFlag[8]{};
+    probe.Arm((GetEnvironmentVariableW(L"DLSS5_X86BRIDGE_TIMING",timingFlag,8)==1&&timingFlag[0]==L'1')
+              ||GetPrivateProfileIntW(L"dlss5",L"Timing",0,ini.c_str())!=0);
     Log("x86bridge native x86 protocol=%u mode=%s StartOn=%d ToggleKey=%d ToggleMods=%d probe=%s",x86bridge::Version,g.transport?"TRANSPORT_ONLY":"NEURAL",g.enabled,g.toggleKey,g.toggleMods,probe.on?"on":"off");
 }
 bool StartHost(){
@@ -1049,6 +1056,51 @@ void OnDestroy(swapchain* sc,bool resize){
     }
     Log("x86bridge swapchain retired resize=%d",resize);
 }
+// Release point for a game that never delivers destroy_swapchain.
+//
+// Everything this add-on holds is released in OnDestroy, and only there. A game that leaves through
+// ExitProcess rather than shutting its renderer down never delivers that callback: GTA IV and
+// Silent Hill 3 both end without it, which is why neither log ever carries "retiring swapchain
+// resize=0" -- Log() flushes every line, so an absent line is code that did not run rather than a
+// buffer that was lost. ReShade then finds its device still referenced and writes "Reference count
+// for IDirect3DDevice9 ... is inconsistent! Leaking resources".
+//
+// The reference is real and it is ours. ComPtr AddRefs the game's own device on both routes --
+// g.game9 on D3D9, and on D3D11 g.game11 is the game's device rather than a private one -- and on
+// D3D9 every staging texture and surface made from it holds one as well.
+//
+// This does NOT silence ReShade's "Reference count ... is inconsistent" warning, and nothing in an
+// add-on can. Measured 2026-09-16 in GTA IV and Half-Life 2 with an unconditional log at the top of
+// this function: it printed nothing in either, so ReShade never delivers the event when a game
+// leaves through ExitProcess. Its own log shows why that cannot be worked around -- it releases the
+// device and warns at 13:17:36, then unloads the add-on at 13:17:38, so the check runs while we are
+// still loaded and still holding the reference, and DLL_PROCESS_DETACH is later still. None of
+// destroy_device, destroy_swapchain or destroy_effect_runtime arrive on that path. The warning is
+// cosmetic: it is written as the process dies and the OS reclaims everything regardless.
+//
+// The handler is kept because it is correct and free for any game that does shut its renderer down.
+//
+// destroy_device is the last callback before the device goes, and unlike DLL_PROCESS_DETACH it does
+// not run under the loader lock, so COM releases are safe here. No GPU work is issued: the device is
+// already on its way out, which is the rule the Reset branch above follows for the same reason. The
+// helper is stopped rather than asked to quit, because a bounded IPC round trip is not worth the
+// risk at teardown and the kill-on-close job would take it anyway.
+//
+// Idempotent on purpose. A clean shutdown reaches OnDestroy first and this then finds nothing left.
+void OnDestroyDevice(device* dev){
+    if(dev==nullptr)return;
+    std::lock_guard lock(g.lock);
+    const uint64_t native=dev->get_native();
+    const uint64_t ours=g.nativeD3D9?reinterpret_cast<uint64_t>(g.game9.Get())
+                                    :reinterpret_cast<uint64_t>(g.game11.Get());
+    if(ours==0||native!=ours)return;
+    Log("x86bridge releasing on device destroy (no destroy_swapchain arrived)");
+    StopHost();
+    ReleaseLocal();
+    g.active=nullptr;controls.runtime=nullptr;
+    g.game9.Reset();g.game11ctx.Reset();g.game11.Reset();
+    g.nativeD3D9=false;g.guideDepthCs.Reset();g.guideDepthCsFailed=false;
+}
 void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,const rect*){
     if(!sc)return;auto* dev=sc->get_device();const auto api=dev->get_api();
     if(api!=device_api::d3d11&&api!=device_api::d3d9)return;
@@ -1190,6 +1242,7 @@ BOOL APIENTRY DllMain(HMODULE module,DWORD reason,LPVOID){
         reshade::register_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
         reshade::register_event<reshade::addon_event::init_swapchain>(OnInit);
         reshade::register_event<reshade::addon_event::destroy_swapchain>(OnDestroy);
+        reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
         reshade::register_event<reshade::addon_event::present>(OnPresent);
         reshade::register_overlay("DLSS Neural Rendering (AMD)",OnOverlay32);
     }else if(reason==DLL_PROCESS_DETACH){
