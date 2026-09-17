@@ -948,7 +948,7 @@ void Settings(){
     // there no matter what. GTA IV does exactly that.
     // The ini is already open on the line above and travels with the install, so it always arrives.
     // Pipelining gives up the same-frame guarantee, and it is the default because the measurements
-    // say the trade is one-sided: +16% to +41% across GTA IV, Resident Evil 5 and Half-Life 2, for
+    // say the trade is one-sided: +16% to +41% across the three games measured, for
     // one frame of lag and no image cost. The back buffer is replaced whole, so a pipelined frame is
     // the previous one finished rather than a mix of two, and all three were checked in both modes
     // with no difference seen. Async=0 restores the old behaviour. Ini rather than environment, for
