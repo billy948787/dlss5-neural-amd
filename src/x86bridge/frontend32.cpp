@@ -254,15 +254,22 @@ struct StageProbe {
     // A gap past kPeriodOutlierMs is not a rendered frame -- alt-tab, a loading screen, a
     // breakpoint -- and one of them swamps an average of 120, so it is dropped. That biases the
     // result slightly optimistic, which is worth knowing when reading it.
-    long long presentMark=0;double period=0.0;unsigned periodFrames=0;bool periodEffect=false;
+    long long presentMark=0;double period=0.0;unsigned periodFrames=0;
+    bool periodEffect=false,periodPipelined=false;
     static constexpr double kPeriodOutlierMs=250.0;
-    void Present(bool effectOn){
+    // Both accumulators are thrown away when the effect is toggled or the presentation mode is
+    // switched, because a window spanning either would average two different things and read as
+    // one. The mode can now change while the game runs, so this is no longer hypothetical.
+    void Present(bool effectOn,bool pipelined){
         if(!on)return;
         LARGE_INTEGER c{};if(!QueryPerformanceCounter(&c))return;
-        if(presentMark!=0&&effectOn==periodEffect){
+        if(presentMark!=0&&effectOn==periodEffect&&pipelined==periodPipelined){
             const double ms=static_cast<double>(c.QuadPart-presentMark)*toMs;
             if(ms<=kPeriodOutlierMs){period+=ms;++periodFrames;}
-        }else{period=0.0;periodFrames=0;periodEffect=effectOn;}
+        }else{
+            if(pipelined!=periodPipelined)Drop();
+            period=0.0;periodFrames=0;periodEffect=effectOn;periodPipelined=pipelined;
+        }
         presentMark=c.QuadPart;
     }
     bool PeriodDue() const {return on&&periodFrames>=120;}
@@ -1041,6 +1048,29 @@ bool SyncControls(){
     if(now-controls.lastStatusAt>=250){if(!StateRequest(Kind::Status))return false;controls.lastStatusAt=now;}
     return true;
 }
+// Switch presentation mode while the game runs.
+//
+// Safe in both directions, and not by accident: CollectPending runs unconditionally at the top of
+// every present, before anything else touches the pipe, so whichever mode the next present picks it
+// starts with nothing outstanding. Turning pipelining off collects the answer in flight and drops
+// it, costing one corrected frame. Turning it on leaves the first present with no previous answer
+// to compose, so that one frame shows the game's own image; at these frame rates it is one frame in
+// sixty and has not been visible in testing.
+//
+// Callers hold g.lock -- the overlay takes it for its whole draw and OnPresent for its whole frame
+// -- so the flag cannot change underneath a present that is already running.
+//
+// Persisted the same way the helper persists its own settings, one key at a time, which leaves
+// every other line in the file alone. Rewriting the whole ini from here would drop Timing and
+// anything else the helper owns.
+void SetAsync(bool async){
+    if(g.async==async)return;
+    g.async=async;
+    probe.Present(g.enabled,g.async);
+    Log("x86bridge presentation switched to %s",async?"pipelined":"same-frame");
+    WritePrivateProfileStringW(L"dlss5",L"Async",async?L"1":L"0",
+        (Directory()/L"dlss5-neural.ini").wstring().c_str());
+}
 #include "overlay32.inc"
 void ClearGuide(Guide& v){
     v.chosen.Reset();v.snap.Reset();v.srv.Reset();v.uav.Reset();v.bridge.Destroy();
@@ -1177,11 +1207,12 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
     if(!sc)return;auto* dev=sc->get_device();const auto api=dev->get_api();
     if(api!=device_api::d3d11&&api!=device_api::d3d9)return;
     std::lock_guard lock(g.lock);Settings();
-    probe.Present(g.enabled);
+    probe.Present(g.enabled,g.async);
     if(probe.PeriodDue()){
         const double avg=probe.period/static_cast<double>(probe.periodFrames);
-        if(avg>0.0)Log("x86bridge frame period over %u frames: %.2f ms (%.1f FPS) with the effect %s",
-            probe.periodFrames,avg,1000.0/avg,probe.periodEffect?"on":"off");
+        if(avg>0.0)Log("x86bridge frame period over %u frames: %.2f ms (%.1f FPS) with the effect %s, %s",
+            probe.periodFrames,avg,1000.0/avg,probe.periodEffect?"on":"off",
+            probe.periodPipelined?"pipelined":"same-frame");
         probe.PeriodDrop();
     }
     struct ClearFrameTallies {~ClearFrameTallies(){g_depthTally.clear();g_motionTally.clear();}} clearFrameTallies;
@@ -1338,9 +1369,10 @@ void OnPresent(command_queue*,swapchain* sc,const rect*,const rect*,uint32_t,con
     if(g.frame<=3||g.frame%120==0)Log("x86bridge frame=%llu result=%u same_frame=1 depth=%u motion=%u",f.id,static_cast<unsigned>(a.result),f.depthValid,f.motionValid);
     if(probe.Due()){
         const double n=static_cast<double>(probe.frames);
-        Log("x86bridge stage probe over %u frames: input+prepare %.2f ms, host %.2f ms, output %.2f ms, bridge total %.2f ms (%s)",
+        Log("x86bridge stage probe over %u frames: input+prepare %.2f ms, host %.2f ms, output %.2f ms, bridge total %.2f ms (%s, %s)",
             probe.frames,probe.input/n,probe.host/n,probe.output/n,(probe.input+probe.host+probe.output)/n,
-            g.nativeD3D9?(g.d3d9Shared?"D3D9 shared GPU staging":"D3D9 classic CPU-compatible staging"):"D3D11 direct");
+            g.nativeD3D9?(g.d3d9Shared?"D3D9 shared GPU staging":"D3D9 classic CPU-compatible staging"):"D3D11 direct",
+            g.async?"pipelined":"same-frame");
         probe.Drop();
     }
 }

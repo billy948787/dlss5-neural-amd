@@ -6,8 +6,9 @@ history from chat. Read this file first, then the repository README, changelog a
 
 ## 1. Read this before changing anything
 
-- Work on **`master`**. The `x86_testing` branch this document was written on is merged and
-  deleted; v0.5.0 was cut from the merge.
+- Work is on **`x86_testing`**, branched from `master` and not yet merged. An earlier branch of the
+  same name was merged and deleted for v0.5.0; this is a new one. It carries the pipelined
+  presentation work described in sections 11 onwards.
 - Remote `origin` is `https://github.com/zmodelerlover/dlss5-neural-amd.git`.
 - Every path in this document is relative: repository paths to the checkout root, game paths to
   wherever that game is installed. Keep a single checkout of this repository and work only in it.
@@ -25,22 +26,42 @@ commits, which are now in `master`:
 | `e6d4ddb` | ignore-rule audit: `release-v*/`, `*.zip`, installer manifests and backups, editor noise |
 | `cfdd1af` | stop ignoring `tools/patch_runtime.py` and `installer/Cargo.lock`, which are not artifacts |
 | `6b273e8` | opt-in stage probe behind `DLSS5_X86BRIDGE_TIMING=1` |
+| `f84fc99` | arm the stage probe from the ini; subscribe `destroy_device`; settle the refcount warning |
+| `c4a6743` | drop a banned game name from a comment, which the contract test forbids in bridge sources |
+| `1e7532f` | pipelined presentation: post the frame, compose the previous present's answer |
+| `67b528c` | give the overlay contract test's frontend stub the `async` member it now reads |
 
-The next feature goes on its own branch and reaches `master` through a PR, the way this one did.
-Nothing is in flight now: `master` is the release, and section 11 is what is left to pick up.
+**In flight, uncommitted on `x86_testing`:** switching presentation mode from the overlay while the
+game runs. Built, contract tests pass, installed in GTA IV, Half-Life 2 and Resident Evil 5, and
+**not yet exercised in a running game** -- nobody has flipped the control with a game open.
+
+`.claude/settings.json` is untracked and arrived with a local plugin install. Decide whether it is
+shared configuration or personal noise before committing anything near it.
+
+A feature goes on its own branch and reaches `master` through a PR, the way v0.5.0 did.
+
 
 ## 2. Last action and exact rollback state
 
-An experimental classic-D3D9 raster alignment policy was tested after Silent Hill 3 showed a
-sharp 60-to-30 FPS transition between Resolution Scale 0.35 and 0.36. The experiment reduced the
-0.36 neural raster from the requested 691x389 to 683x384 when a dimension was just above a
-32-pixel boundary. It also added per-stage D3D9 timing logs.
+The last work was pipelined presentation, in `1e7532f`, plus an uncommitted change that makes the
+mode switchable while the game runs. Both are `x86_testing` only; `master` is unchanged and remains
+the release.
+
+To roll the feature back without touching anything else, set `Async=0` under `[dlss5]` in a game's
+`dlss5-neural.ini`, or flip the overlay's Timing control. That restores same-frame presentation
+exactly: the same code path runs, minus two clock reads. Nothing else in `1e7532f` changes
+behaviour on its own.
+
+An earlier experiment, a classic-D3D9 raster alignment policy, was tested after Silent Hill 3
+showed a sharp 60-to-30 FPS transition between Resolution Scale 0.35 and 0.36. It reduced the 0.36
+neural raster from the requested 691x389 to 683x384 when a dimension sat just above a 32-pixel
+boundary, and added per-stage D3D9 timing logs.
 
 **The transition it was chasing has since been explained, and it was not a rendering boundary at
 all.** See section 4.2. Resolving it required no change to this project's code.
 
-The user reported that this made the result worse. That experiment was fully removed from source.
-Do not reintroduce any of these identifiers or behaviors without new evidence:
+The user reported that it made the result worse, and it was fully removed from source. Do not
+reintroduce any of these identifiers or behaviours without new evidence:
 
 - `FrameFlagClassicD3D9`
 - `EfficientClassicD3D9Scale`
@@ -938,6 +959,23 @@ is a CPU round trip:
 **Pipelining is the one option that hides the wait, and it is now implemented and on**, behind
 `Async` under `[dlss5]` in `dlss5-neural.ini`, and **it is now the default**. `Async=0` restores
 same-frame presentation.
+
+**The mode switches while the game runs**, from the overlay's Timing control, which reads and writes
+the frontend's own flag rather than a shadow field and needs no round trip to the helper. That is
+safe in both directions for a reason that predates the feature: `CollectPending` runs unconditionally
+at the top of every present, before anything else touches the pipe, so whichever mode the next
+present picks, it starts with nothing outstanding. Turning pipelining off collects the answer in
+flight and drops it, costing one corrected frame; turning it on leaves the first present with no
+previous answer to compose, so that frame shows the game's own image. Both callers hold `g.lock` for
+their whole body, so the flag cannot change underneath a present already running.
+
+The choice is persisted one key at a time, the way the helper persists its own settings. Rewriting
+the whole ini from the frontend would drop `Timing` and everything the helper owns.
+
+A timing window that spans a switch is discarded rather than averaged, the same treatment a window
+spanning an effect toggle already got. Both log lines now name the mode they were measured in, which
+matters more than it sounds: half the wrong conclusions in this document came from comparing numbers
+whose conditions were not written down beside them.
 Async does not hide the transport -- the capture and the return still happen in `Present` either
 way. **It hides the wait.** The frame is posted without waiting for it, the answer to the previous
 present's frame is composed instead, and the helper works while the game builds its next frame.
@@ -978,8 +1016,21 @@ flat while only `host` grows. Section 4.2 is the record of what guessing cost la
 
 ### Open questions, not yet defects
 
-**The D3D9 reference count at process exit** is diagnosed and fixed; see 4.6. What is left is live
-confirmation that the warning is gone from GTA IV and Silent Hill 3.
+**The D3D9 reference count at process exit** is closed, not open. It is diagnosed, it is cosmetic,
+and no add-on can prevent it: ReShade never delivers `destroy_device` on that exit path and warns
+two seconds before it unloads the add-on. See 4.6. This entry used to claim it was fixed and awaiting
+live confirmation; the confirmation happened and disproved the fix.
+
+**Pipelining with `Inline=0` is untested.** Inline composition waits on a helper flag on the game's
+own queue, and pipelining defers the result by a frame. Both defer, and nothing has checked that
+they defer by the same frame. Everything measured so far ran `Inline=1`.
+
+**The inline GPU wait survives pipelining.** In a run where the frontend's CPU-side residual was
+0.01 ms, the helper still reported the game's queue spinning for the whole network duration. It is
+the next lever of the size just removed, and it is on the GPU rather than the CPU.
+
+**Pipelining on 32-bit D3D11 is untested.** The bridge serves it and the code path is shared, so it
+should behave like the D3D9Ex case, but no game has exercised it.
 
 **Reliable depth on Vulkan.** A separate capture and discovery project. Do not enable a switch that
 has no real resource behind it.
@@ -1005,6 +1056,45 @@ The items that used to sit here are resolved or moved:
 
 Translating the installer is likewise its own repository's work. The **add-on overlay** already has
 a `Language` control, English or Brazilian Portuguese, written to `dlss5-neural.ini` as `Language=`.
+
+### How to measure this, and three ways it went wrong
+
+Every wrong conclusion recorded in this document came from the measurement, not the code. The
+frontend's probe is sound; reading it carelessly is what produced the errors.
+
+**Pair against adjacent windows, never a median and never the tail.** GTA IV's own frame cost drifts
+by a factor of two across one session as traffic and time of day move. An effect-on block paired
+with effect-off windows from elsewhere in the same log made pipelining look worthless when it was
+worth +41%.
+
+**Aggregate every window, and where a game ships a benchmark its number is the measurement.** The
+Resident Evil 5 benchmark path is not uniform: same-frame windows span 16.25 to 24.29 ms. The last
+six average 16.52; all 54 average 19.88, and the benchmark itself reported 21.46. Reading the tail
+understated the gain by five times.
+
+**State the conditions beside the number.** Both probe log lines now name the presentation mode and
+the effect state they were measured in. Several days of confusion came from comparing figures whose
+conditions were not written down next to them.
+
+A game whose frame lands on a display-sync boundary cannot measure a small change at all: Silent
+Hill 3 quantises to 16.6 and 33.4 ms, so the 1.8 ms available to it is invisible between steps.
+Check for `VSYNC=OFF` and an uncapped frame rate before trusting any subject.
+
+### The test suite needs a C++20 compiler, and this machine does not have one
+
+`tools/test-x86bridge.py` and `tools/test-x86bridge-v2.py` compile real translation units. The
+development machine used for this work had only MinGW.org g++ 6.3, which rejects `-std=c++20`, and
+both scripts pick it up through `shutil.which('g++')` unless `CXX` says otherwise.
+
+The failure is quiet in the worst way. `test-x86bridge.py` prints `PASS static boundaries` first,
+then dies at the `protocol_test.cpp` compile and never reaches the line that invokes the v2 suite.
+A local run therefore looks like it mostly passed while the entire v2 suite -- the overlay syntax
+check and the generic-source rules -- never ran at all. Twice during this work that let something
+reach CI that a local run should have caught.
+
+Treat a compiler failure in these scripts as missing coverage rather than environment noise, and say
+which checks actually ran. Installing a recent g++ or clang and pointing `CXX` at it makes the whole
+suite runnable locally, and is worth doing before the next change to `src/x86bridge/`.
 
 ### Housekeeping
 

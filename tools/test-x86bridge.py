@@ -84,6 +84,21 @@ assert 'probe.Keep(inputMs,collectMs+requestMs,probe.Split())' in present
 # Pipelining is the default, and Async=0 has to keep restoring same-frame presentation: the
 # guarantee it gives up is deliberate, so the escape hatch is part of the contract.
 assert 'L"Async",1,ini.c_str()' in f
+# The mode can be switched while the game runs. It is idempotent, it says so in the log, and it
+# persists one key rather than rewriting the file, which would drop Timing and the helper's own
+# settings. It must not issue IPC or GPU work: the switch costs at most one frame either way
+# precisely because nothing has to be reconciled.
+setasync=f[f.index('void SetAsync(bool async){'):f.index('#include "overlay32.inc"')]
+assert 'if(g.async==async)return;' in setasync and 'WritePrivateProfileStringW(L"dlss5",L"Async"' in setasync
+assert 'presentation switched to' in setasync
+for unsafe in ['Request(','Post(','Collect(','FlushAndWait','CopyResource','StopHost']:
+ assert unsafe not in setasync,unsafe
+# A period or stage window that spans a mode switch would average two different things and read as
+# one, so both accumulators are thrown away when the mode changes.
+assert 'void Present(bool effectOn,bool pipelined)' in sp
+assert 'effectOn==periodEffect&&pipelined==periodPipelined' in sp
+assert 'if(pipelined!=periodPipelined)Drop();' in sp
+assert 'probe.Present(g.enabled,g.async)' in present
 # The pipe carries one conversation. A posted frame must be collected before anything else uses the
 # pipe, or its answer is delivered into an unrelated call: hence before SyncControls, which talks
 # every present, and before OnDestroy touches DropRemote or Quit.
@@ -105,9 +120,9 @@ assert present.index('BuildRemote()')<present.index('g.pendingFrame.generation==
 # while the effect is off: it sits before the early-outs rather than beside the stage splits, and
 # it is read once per present. A window that spans a toggle is thrown away, because averaging the
 # effect's frames together with the game's own would answer neither question.
-assert present.count('probe.Present(g.enabled)')==1
-assert present.index('probe.Present(g.enabled)')<present.index('if(g.active&&g.active!=sc)return;')
-assert present.index('probe.Present(g.enabled)')<present.index('probe.Begin()')
+assert present.count('probe.Present(g.enabled,g.async)')==1
+assert present.index('probe.Present(g.enabled,g.async)')<present.index('if(g.active&&g.active!=sc)return;')
+assert present.index('probe.Present(g.enabled,g.async)')<present.index('probe.Begin()')
 assert 'effectOn==periodEffect' in sp and 'periodFrames=0;periodEffect=effectOn;' in sp
 assert 'kPeriodOutlierMs' in sp
 # The rejected classic-D3D9 raster experiment must not come back with it.
