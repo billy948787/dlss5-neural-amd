@@ -6,8 +6,9 @@ history from chat. Read this file first, then the repository README, changelog a
 
 ## 1. Read this before changing anything
 
-- Work on **`master`**. The `x86_testing` branch this document was written on is merged and
-  deleted; v0.5.0 was cut from the merge.
+- Work is on **`x86_testing`**, branched from `master` and not yet merged. An earlier branch of the
+  same name was merged and deleted for v0.5.0; this is a new one. It carries the pipelined
+  presentation work described in sections 11 onwards.
 - Remote `origin` is `https://github.com/zmodelerlover/dlss5-neural-amd.git`.
 - Every path in this document is relative: repository paths to the checkout root, game paths to
   wherever that game is installed. Keep a single checkout of this repository and work only in it.
@@ -25,22 +26,42 @@ commits, which are now in `master`:
 | `e6d4ddb` | ignore-rule audit: `release-v*/`, `*.zip`, installer manifests and backups, editor noise |
 | `cfdd1af` | stop ignoring `tools/patch_runtime.py` and `installer/Cargo.lock`, which are not artifacts |
 | `6b273e8` | opt-in stage probe behind `DLSS5_X86BRIDGE_TIMING=1` |
+| `f84fc99` | arm the stage probe from the ini; subscribe `destroy_device`; settle the refcount warning |
+| `c4a6743` | drop a banned game name from a comment, which the contract test forbids in bridge sources |
+| `1e7532f` | pipelined presentation: post the frame, compose the previous present's answer |
+| `67b528c` | give the overlay contract test's frontend stub the `async` member it now reads |
 
-The next feature goes on its own branch and reaches `master` through a PR, the way this one did.
-Nothing is in flight now: `master` is the release, and section 11 is what is left to pick up.
+**In flight, uncommitted on `x86_testing`:** switching presentation mode from the overlay while the
+game runs. Built, contract tests pass, installed in GTA IV, Half-Life 2 and Resident Evil 5, and
+**not yet exercised in a running game** -- nobody has flipped the control with a game open.
+
+`.claude/settings.json` is untracked and arrived with a local plugin install. Decide whether it is
+shared configuration or personal noise before committing anything near it.
+
+A feature goes on its own branch and reaches `master` through a PR, the way v0.5.0 did.
+
 
 ## 2. Last action and exact rollback state
 
-An experimental classic-D3D9 raster alignment policy was tested after Silent Hill 3 showed a
-sharp 60-to-30 FPS transition between Resolution Scale 0.35 and 0.36. The experiment reduced the
-0.36 neural raster from the requested 691x389 to 683x384 when a dimension was just above a
-32-pixel boundary. It also added per-stage D3D9 timing logs.
+The last work was pipelined presentation, in `1e7532f`, plus an uncommitted change that makes the
+mode switchable while the game runs. Both are `x86_testing` only; `master` is unchanged and remains
+the release.
+
+To roll the feature back without touching anything else, set `Async=0` under `[dlss5]` in a game's
+`dlss5-neural.ini`, or flip the overlay's Timing control. That restores same-frame presentation
+exactly: the same code path runs, minus two clock reads. Nothing else in `1e7532f` changes
+behaviour on its own.
+
+An earlier experiment, a classic-D3D9 raster alignment policy, was tested after Silent Hill 3
+showed a sharp 60-to-30 FPS transition between Resolution Scale 0.35 and 0.36. It reduced the 0.36
+neural raster from the requested 691x389 to 683x384 when a dimension sat just above a 32-pixel
+boundary, and added per-stage D3D9 timing logs.
 
 **The transition it was chasing has since been explained, and it was not a rendering boundary at
 all.** See section 4.2. Resolving it required no change to this project's code.
 
-The user reported that this made the result worse. That experiment was fully removed from source.
-Do not reintroduce any of these identifiers or behaviors without new evidence:
+The user reported that it made the result worse, and it was fully removed from source. Do not
+reintroduce any of these identifiers or behaviours without new evidence:
 
 - `FrameFlagClassicD3D9`
 - `EfficientClassicD3D9Scale`
@@ -656,19 +677,52 @@ averages of 120 frames, with `host` swinging six-fold while the two transport st
 | 5.67 ms | **59.59 ms** | 3.04 ms | 68.29 ms |
 | 5.93 ms | 45.17 ms | 3.10 ms | 54.20 ms |
 
-`input+prepare` stays inside 5.16-5.93 and `output` inside 2.92-3.10 across all of it. **Transport on
-this path is 8.3-9.0 ms per frame, call it 8.6, and no setting in the overlay reaches it.** That is
-higher than the 5.55 ms section 4.5 measured elsewhere, so 5.55 should not be quoted for GTA IV.
-The floor is therefore:
+`input+prepare` stays inside 5.16-5.93 and `output` inside 2.92-3.10 across all of it. **Neither
+follows the network, so no Resolution Scale setting reaches either.** In that session they summed to
+8.3-9.0 ms. A later session measured 6.0 ms in the same game, so do not quote a single figure: see
+"What the game costs on its own", which separates the part that is genuinely fixed from the part
+that tracks the game's GPU load. The 5.55 ms in section 4.5 is a different game and does not apply
+here either.
 
-- Scale 1.00: ~26.5 ms network + ~8.6 ms transport = ~35 ms, a ~29 FPS ceiling
-- Scale 0.50: ~16.8 ms network + ~8.6 ms transport = ~25 ms, a ~39 FPS ceiling
-- Transport alone, with the network free, would still cap the game at ~116 FPS
+The numbers that survived re-measurement, and what they imply for the ceiling, are in the next
+section.
 
-The ceiling did rise. If observed FPS did not, the game was already delivering below the lower
-ceiling for its own reasons -- GTA IV is CPU-bound and carries its own limiter -- and the neural
-cost was never the binding constraint at that setting. Less GPU work with the same frame rate is
-exactly what a non-GPU limiter looks like.
+**The first explanation offered here was wrong, and the measurement disproves it.** This section
+originally argued that observed FPS did not rise because GTA IV is CPU-bound and carries its own
+limiter. The period probe says otherwise: with the effect off, standing still, the game runs its own
+frame in **7 ms, about 140 FPS**. It is nowhere near a limiter of its own.
+
+**The real answer came from a scale sweep with the probe armed**, 2026-09-16, standing still outside
+the starting apartment, effect toggled between steps:
+
+| Resolution Scale | frame | FPS | network | bridge total | frame outside the bridge |
+|---|---|---|---|---|---|
+| 1.00, 1920x1080 | 40.46 ms | 24.7 | 27.50 ms | 33.55 ms | 6.91 ms |
+| 0.50, 960x540 | 29.67 ms | 33.7 | 16.84 ms | 23.88 ms | 5.79 ms |
+| 0.25, 480x270 | 29.56 ms | 33.8 | 9.98 ms | 17.85 ms | 11.71 ms |
+| 0.25, later | 26.38 ms | 37.9 | 6.44 ms | 14.36 ms | 12.02 ms |
+
+**Scale works, down to a point, and then stops.** 1.00 to 0.50 is a real 24.7 to 33.7 FPS. From 0.50
+to 0.25 the network gives up 6.9 ms and **the frame does not move at all** -- 29.67 to 29.56. That is
+the reported complaint, captured with instrumentation.
+
+**Where the 6.9 ms went is in the last column.** The frame outside the bridge doubles, 5.79 to 11.71
+ms, exactly as the network shrinks. The `enabled=0` windows on either side read 14.7-14.8 ms, so by
+that point in the session the game's own frame had grown from 7 ms to about 14.8.
+
+The mechanism is that **the game's GPU work already overlaps the network wait**. Its draw calls were
+submitted before `Present`, so they run while the CPU sits in the IPC round trip. With the network
+at 16.84 ms there is enough wait to hide roughly 9 ms of the game's own work. At 9.98 ms there is
+not, and the rest becomes exposed. Once the network drops below what the game needs anyway,
+shrinking it further buys nothing, because the game is the long pole.
+
+So the control is not broken and the scale change is not being ignored. It stops paying at the point
+where the network stops being the longest term, and on this hardware in this scene that is around
+scale 0.50.
+
+Two limits on this run: the game's own cost drifted from 7 ms to about 14.8 ms across the session,
+so the rows are not perfectly comparable; and the last row's network fell to 6.44 ms at the same
+480x270 raster as the row above, which is unexplained.
 
 **The practical consequence.** On the classic D3D9 path, Resolution Scale has a hard floor of
 roughly 5.5 ms that it cannot reach, and past the point where the network drops under the game's
@@ -683,6 +737,211 @@ frontend now also accepts `Timing=1` under `[dlss5]` in `dlss5-neural.ini`, whic
 install and does not care how the game was started. The environment variable still works where it
 already worked.
 
+
+### What the game costs on its own, and what pipelining would buy
+
+The stage probe says what the bridge costs but not what the game costs, and the pipelining estimate
+needs both. The frontend now also samples the present-to-present period, before the effect's
+early-outs, so it keeps measuring while the effect is off. Toggling the effect in a fixed scene
+supplies the missing term.
+
+Measured 2026-09-16 in GTA IV, standing still outside the starting apartment, scale 1.00. Adjacent
+windows, effect off then on:
+
+| | present period | bridge total |
+|---|---|---|
+| effect off | 7.05 - 7.19 ms (~140 FPS) | -- |
+| effect on | 40.30 - 40.72 ms (~24.7 FPS) | 33.44 - 33.58 ms |
+
+The two agree: 7.05 measured off, plus 33.5 of bridge, predicts 40.6, and 40.5 was measured. The
+model `frame = game + transport + network` holds, with **game 7.05 ms, transport 6.02 ms
+(input+prepare 3.09 + output 2.93), network 27.52 ms**.
+
+**Transport is not one fixed number.** `output` was 2.93 here and 2.92-3.10 in the earlier session,
+so the return leg really is fixed. `input+prepare` was 3.09 here against 5.16-5.93 earlier, in the
+same game at the same raster. It covers the D3D11 drain before the request, so part of what it
+charges is the game's own outstanding GPU work being waited on, not transfer. That matters twice:
+quoting a single transport figure is wrong, and the variable part is work pipelining would also
+hide.
+
+**A projection was made here from the sweep, and the live A/B disproved it.** It claimed +47% at
+scale 1.00 rising to +77% lower down, by replacing a serial frame with
+`max(everything but the network, the network)`. That formula assumes the rest of the frame overlaps
+the network perfectly once the wait is moved. **It does not, and worse, the same-frame path was
+already overlapping most of it**, so the projection counted the same benefit twice. The measured
+result is in "What pipelining actually did" below. Do not reuse the formula.
+
+**It would also make the scale control behave.** Pipelined, the network is the only term Resolution
+Scale moves and it stays the binding one for longer, so lowering it keeps paying further down than
+it does today.
+
+**The costs are unchanged and are not small**: one frame of latency, and the correction computed
+at the measured 62 FPS, about 16 ms. **The cost is latency and nothing else**, and the image was
+checked in both modes in all three measured games: identical.
+
+**That was predicted wrongly here several times, and the code says why.** The warnings above about
+ghosting and smearing describe a residual from one frame being applied to a different one. This
+implementation does not do that. `DownloadD3D9Frame` copies the whole surface, so the back buffer is
+replaced outright by the helper's finished output. Pipelined, that output is frame N-1 complete and
+self-consistent: nothing from frame N is mixed into it, so there is nothing to ghost against. Every
+frame is still shown exactly once, one present later than it was rendered.
+
+A residual-based composition would smear, and `ResidualLimit` suggests the runtime works in those
+terms internally. It does not reach this seam: what crosses the bridge is a finished frame.
+
+**So the trade is one frame of lag for +16% to +41%, with no measured image cost.** An early argument
+for keeping `Async` off by default was that a game gaining only 7% should not pay a frame of latency.
+That 7% came from a mis-sampled measurement and does not exist. On the evidence, the remaining case
+for the current default is conservatism about a guarantee that was given up deliberately, not a
+measured downside.
+
+### What pipelining actually did, measured
+
+Four subjects, 2026-09-16, each an A/B on the `Async` flag alone with the ini compared before and
+after so nothing else differed. **Final numbers:**
+
+| game | path | same-frame | pipelined | gain |
+|---|---|---|---|---|
+| GTA IV | D3D9 classic | 43.8 FPS | 61.6 FPS | **+41%** |
+| Resident Evil 5 | D3D9 classic | 46.6 FPS | 62.2 FPS | **+33%** |
+| Half-Life 2 | D3D9Ex shared | 77.0 FPS | 89.3 FPS | **+16%** |
+| Silent Hill 3 | D3D8 -> D3D9 classic | not measurable | | |
+
+**No dropped frames and no faults in any of them.** Resident Evil 5 alone produced five swapchain
+resets across its two runs, which exercised the stale-answer guard without one spurious drop. Silent
+Hill 3 ran correctly but could not be measured: its own frame is 1.8 ms against a 9.4 ms network, and
+its frame lands on a display-sync boundary, so the periods quantise to 16.6 and 33.4 ms and the
+1.8 ms at stake is invisible between steps of 16.67.
+
+Resident Evil 5's figures are the game's own benchmark, which is the measurement of record; the
+others are the frontend's period probe over adjacent windows. The detail for each follows.
+
+**GTA IV, classic CPU staging, 960x540, Scale 0.5, A/B on the `Async` flag alone.** The ini was
+snapshotted before the first run and compared after it, so nothing but the flag differed. Each
+effect-on block is paired with the effect-off windows **immediately adjacent to it in the log**,
+which is the only way to know the two describe the same scene:
+
+| run | game alone | with effect | FPS | bridge | host residual | network |
+|---|---|---|---|---|---|---|
+| same-frame | 7.36 ms | 22.83 ms | **43.8** | 15.71 ms | 10.02 ms | 9.0 ms |
+| pipelined | 7.29 ms | 16.24 ms | **61.6** | 9.19 ms | 3.64 ms | 9.9 ms |
+| pipelined, second run | 7.65 ms | 16.19 ms | **61.8** | 13.76 ms | 7.86 ms | 9.7 ms |
+
+The game-alone baselines agree to within 0.36 ms, so this is the same spot. **43.8 to 61.6 FPS,
++41%**, reproduced by two independent pipelined runs.
+
+**The model that fits every block.** Same-frame serializes, so the frame is
+`game + transport + network`: 7.36 + 5.74 + 9.0 = 22.1 against 22.83 measured. Pipelined, the game's
+own frame and the network run concurrently, so it is `max(game, network) + transport`:
+max(7.29, 9.9) + 5.9 = 15.8 against 16.24 measured.
+
+**Pipelining removes `min(game, network)` from the frame.** Here the game is 7.3 ms and the network
+9.9, so it removes the game's own time. That also explains the residual, which is not a constant:
+inside one block it grew from 2.93 ms to 8.19 ms while the frame stayed pinned at 16.0, because a
+lighter game frame covers less of the network and the wait absorbs the difference. The frame does
+not move, because it is the network setting the pace, not the game.
+
+**An earlier reading of this same data concluded that pipelining bought nothing here, and it was
+wrong.** The same-frame effect-on block was paired with effect-off windows taken from the tail of
+that log, 13.40 ms, which came from a heavier part of the session rather than from beside the
+measurement. That inflated the same-frame baseline and made the effect look 9.40 ms cheap instead of
+15.47. The adjacent windows are 7.36. **Pair against adjacent windows, never against a median or a
+tail**: the game's own cost drifts by a factor of two across a session as traffic and time of day
+move.
+it already.
+
+**Half-Life 2, shared GPU staging, Scale 0.5, same build, A/B on the `Async` flag alone.** The
+effect-off baseline is 3.46 ms in one run and 3.47 in the other, so the scene is the same and the
+two are directly comparable:
+
+| | effect off | effect on | bridge total | host |
+|---|---|---|---|---|
+| same-frame | 3.46 ms, 289 FPS | 13.00 ms, **77.0 FPS** | 11.14 ms | 10.10 ms |
+| pipelined | 3.47 ms, 288 FPS | 11.20 ms, **89.3 FPS** | 8.3 - 10.3 ms | 7.1 - 9.2 ms |
+
+**+16%, and that is the whole win available here.** The network costs 10.1 ms and the game's own
+frame is 3.47 ms. **Pipelining can hide at most the game's own frame time**, because that is all the
+game gives it to work behind. Half-Life 2 finishes in 3.5 ms and comes back asking for an answer
+that needs 10, so most of the wait survives: the residual is 7.1 to 9.2 ms against 10.1 serial. The
+measured saving is 1.8 ms against a 3.47 ms ceiling, which is the "half to two thirds of the stated
+gain" caveat holding exactly.
+
+Its transport was already trivial on the shared path -- 0.70 in, 0.35 out -- so there was nothing
+else to win either.
+
+Its same-frame numbers are worth noting for their stability: 12.94 to 13.05 ms across eighteen
+windows, a spread of 0.1 ms. Pipelined presentation is noisier by construction, because each frame
+depends on how much of the previous one's work the game happened to cover.
+
+
+
+### Resident Evil 5, and how to read a benchmark
+
+Resident Evil 5 has a built-in benchmark: a fixed camera path, `VSYNC=OFF`, `FrameRate=VARIABLE`,
+and an average FPS reported at the end. A/B on the `Async` flag alone, 960x540, Scale 0.5, ini
+compared before and after:
+
+| | benchmark result | frame |
+|---|---|---|
+| same-frame | **46.6 FPS** | 21.46 ms |
+| pipelined | **62.2 FPS** | 16.08 ms |
+
+**+33.5%**, a saving of 5.38 ms. Zero dropped frames, zero faults, five swapchain resets across the
+runs, which exercised the stale-answer guard without one spurious drop.
+
+**Use the game's own benchmark figure, and never the tail of the log.** A first pass at this
+reported 60.5 against 64.5 FPS, a +6.6% that was wrong twice over. The benchmark's path is not
+uniform: the same-frame windows span 16.25 to 24.29 ms, with 24 of 54 between 20 and 22 and only the
+closing stretch near 16.5. Averaging every window gives 50.3 FPS, within a few percent of the 46.6
+the benchmark reported. Reading the last six gives 60.5, which is 30% optimistic and describes the
+easiest part of the run.
+
+The same mistake had already been made twice this day, both times by sampling the end of a log
+instead of aggregating it. **Aggregate every window; where a game ships a benchmark, its number is
+the measurement and ours is at best a cross-check.**
+
+### The rule
+
+**saving = min(game, network), less whatever already overlapped**, where the overlap is
+`game + bridge - frame` measured in same-frame mode: what the bridge spent that never reached the
+frame because the game's GPU work ran while our CPU sat blocked in the IPC wait.
+
+| | min(game, network) | already overlapping | ceiling | measured saving |
+|---|---|---|---|---|
+| GTA IV | 7.36 ms | -0.73 ms | 8.09 ms | 6.59 ms |
+| Resident Evil 5 | 8.37 ms | 1.47 ms | 6.90 ms | 5.38 ms |
+| Half-Life 2 | 3.47 ms | 1.62 ms | 1.85 ms | 1.80 ms |
+
+Every game lands between 66% and 97% of its ceiling. The overlap term is small everywhere measured,
+between -0.73 and 1.62 ms, so **`min(game, network)` alone is a good first estimate** and the
+correction is a haircut rather than the story.
+
+An earlier version of this table put Resident Evil 5's overlap at 6.12 ms and its gain at 6.6%, and
+concluded that existing overlap was the dominant term. Both came from the tail-sampled frame time of
+16.52 ms instead of the true 21.46. With the benchmark's own figure the game falls in line with the
+other two.
+
+Measured gains: **+16% to +41%**, and the largest is in the case that needs it most, a heavy game on
+the classic D3D9 path.
+
+
+### The inline GPU wait, a second serialization pipelining does not touch
+
+The helper still reports the game's GPU queue spinning for the whole network duration, in the same
+run where the frontend's CPU-side residual is 0.08 ms:
+
+```
+game queue: capture copies 0.02, spin waiting on us 9.9, residual copy+apply 0.02
+```
+
+That is `Inline=1`: the composition waits on a flag from the helper **on the game's own queue**, so
+the frame is finished in place. Pipelining removed the CPU wait and left this one standing. It costs
+less than it looks, because the spin overlaps the game's own CPU work -- GTA IV measured 11.5 ms
+with the effect off against 18.3 ms with it on, an 6.8 ms delta against a 9.9 ms spin -- but it is
+real, and it is the next lever of that size on this path.
+
+It is untested whether `Inline=0` composes correctly alongside pipelined presentation. Both defer
+the result by design and nothing has yet checked that they defer it by the same frame.
 ### What is actually left for the classic D3D9 path
 
 The 5.55 ms is 8.3 MB crossing PCIe down, 8.3 MB copied between two API allocations on the CPU, and
@@ -697,17 +956,59 @@ is a CPU round trip:
 - Less data cannot be sent. The full frame is needed both as network input and to compose the
   corrected result at full resolution.
 
-**The one option that would hide it is pipelining**, and it is not implemented: the overlay's Timing
-control says "Async previous-frame presentation is not implemented by the x86 process bridge yet".
-Today capture, network and return are serialized inside `Present`: roughly 15.5 ms of which 5.55 ms
-is transport and 10 ms is waiting for the network. Async does not hide the transport -- the capture
-and the return still happen in `Present` either way. **It hides the wait.** Frame N is handed to the
-network without waiting for it, and what is presented is frame N-1's finished result, so `Present`
-carries the 5.55 ms of copies and none of the 10 ms of inference.
+**Pipelining is the one option that hides the wait, and it is now implemented and on**, behind
+`Async` under `[dlss5]` in `dlss5-neural.ini`, and **it is now the default**. `Async=0` restores
+same-frame presentation.
 
-That costs one frame of latency and gives up the `same_frame=1` guarantee the bridge was built and
-validated around, which is a design decision rather than a fix. It is the only remaining lever of
-that size, so it is worth deciding deliberately rather than by default.
+**The mode switches while the game runs**, from the overlay's Timing control, which reads and writes
+the frontend's own flag rather than a shadow field and needs no round trip to the helper. That is
+safe in both directions for a reason that predates the feature: `CollectPending` runs unconditionally
+at the top of every present, before anything else touches the pipe, so whichever mode the next
+present picks, it starts with nothing outstanding. Turning pipelining off collects the answer in
+flight and drops it, costing one corrected frame; turning it on leaves the first present with no
+previous answer to compose, so that frame shows the game's own image. Both callers hold `g.lock` for
+their whole body, so the flag cannot change underneath a present already running.
+
+The choice is persisted one key at a time, the way the helper persists its own settings. Rewriting
+the whole ini from the frontend would drop `Timing` and everything the helper owns.
+
+A timing window that spans a switch is discarded rather than averaged, the same treatment a window
+spanning an effect toggle already got. Both log lines now name the mode they were measured in, which
+matters more than it sounds: half the wrong conclusions in this document came from comparing numbers
+whose conditions were not written down beside them.
+Async does not hide the transport -- the capture and the return still happen in `Present` either
+way. **It hides the wait.** The frame is posted without waiting for it, the answer to the previous
+present's frame is composed instead, and the helper works while the game builds its next frame.
+
+How it is built, and the rules that keep it safe:
+
+- `bridge_io.h` splits `Request` into `Post` and `Collect`. `Request` is now defined as the two
+  together, so the wire rules are written once and cannot drift between the paths.
+- **The pipe carries one conversation.** An uncollected answer is delivered into whatever reads
+  next, so `CollectPending` runs before `SyncControls`, which talks every present, and before
+  `OnDestroy` reaches `DropRemote` or `Quit`. Collecting there is a bounded pipe read, not a GPU
+  wait, so it does not re-enter the display driver that `OnDestroy` is written to stay clear of.
+- **One output texture**, so the helper is not given new work until the last result has left it:
+  the post happens after the compose, at the very end of the present. No extra copy and no second
+  allocation were introduced to allow the overlap.
+- `StopHost` clears the outstanding frame, which is what makes every `Fault` path safe without each
+  one remembering to.
+- An answer is dropped rather than composed if the generation or the raster moved under it.
+  `Confirmed` cannot catch either, because the answer does agree with the frame that asked; it is
+  the world underneath that changed. The raster case is a resize. The generation case is a rebuild
+  in `BuildRemote`, which runs between the post and the compose and replaces the very output texture
+  the result was written into. That one is easy to miss and would read a retired surface.
+
+The stage probe measures both modes. The reported `host` figure is the sum of the wait before
+`SyncControls` and the wait at the request, so the two modes stay comparable; in pipelined mode it
+is the residual, meaning how much of the helper's work the game's own frame failed to cover. A
+figure near zero means the network is fully hidden.
+
+**The costs are unchanged.** One frame of latency, and the correction computed from frame N landing
+on frame N+1, which is the `same_frame=1` guarantee being given up deliberately. Standing still it
+is one frame of lag and no image cost: the back buffer is replaced whole, so the displayed frame is
+N-1 complete rather than a mix, and it was checked in both modes in three games with no difference
+seen. Reprojection would only be needed if the seam ever became residual-based.
 
 **Quantify before optimising anything else.** With `DLSS5_X86BRIDGE_TIMING=1` and no frame-rate cap
 in the way, run one title at several Resolution Scales: `input+prepare` and `output` should stay
@@ -715,8 +1016,21 @@ flat while only `host` grows. Section 4.2 is the record of what guessing cost la
 
 ### Open questions, not yet defects
 
-**The D3D9 reference count at process exit** is diagnosed and fixed; see 4.6. What is left is live
-confirmation that the warning is gone from GTA IV and Silent Hill 3.
+**The D3D9 reference count at process exit** is closed, not open. It is diagnosed, it is cosmetic,
+and no add-on can prevent it: ReShade never delivers `destroy_device` on that exit path and warns
+two seconds before it unloads the add-on. See 4.6. This entry used to claim it was fixed and awaiting
+live confirmation; the confirmation happened and disproved the fix.
+
+**Pipelining with `Inline=0` is untested.** Inline composition waits on a helper flag on the game's
+own queue, and pipelining defers the result by a frame. Both defer, and nothing has checked that
+they defer by the same frame. Everything measured so far ran `Inline=1`.
+
+**The inline GPU wait survives pipelining.** In a run where the frontend's CPU-side residual was
+0.01 ms, the helper still reported the game's queue spinning for the whole network duration. It is
+the next lever of the size just removed, and it is on the GPU rather than the CPU.
+
+**Pipelining on 32-bit D3D11 is untested.** The bridge serves it and the code path is shared, so it
+should behave like the D3D9Ex case, but no game has exercised it.
 
 **Reliable depth on Vulkan.** A separate capture and discovery project. Do not enable a switch that
 has no real resource behind it.
@@ -742,6 +1056,45 @@ The items that used to sit here are resolved or moved:
 
 Translating the installer is likewise its own repository's work. The **add-on overlay** already has
 a `Language` control, English or Brazilian Portuguese, written to `dlss5-neural.ini` as `Language=`.
+
+### How to measure this, and three ways it went wrong
+
+Every wrong conclusion recorded in this document came from the measurement, not the code. The
+frontend's probe is sound; reading it carelessly is what produced the errors.
+
+**Pair against adjacent windows, never a median and never the tail.** GTA IV's own frame cost drifts
+by a factor of two across one session as traffic and time of day move. An effect-on block paired
+with effect-off windows from elsewhere in the same log made pipelining look worthless when it was
+worth +41%.
+
+**Aggregate every window, and where a game ships a benchmark its number is the measurement.** The
+Resident Evil 5 benchmark path is not uniform: same-frame windows span 16.25 to 24.29 ms. The last
+six average 16.52; all 54 average 19.88, and the benchmark itself reported 21.46. Reading the tail
+understated the gain by five times.
+
+**State the conditions beside the number.** Both probe log lines now name the presentation mode and
+the effect state they were measured in. Several days of confusion came from comparing figures whose
+conditions were not written down next to them.
+
+A game whose frame lands on a display-sync boundary cannot measure a small change at all: Silent
+Hill 3 quantises to 16.6 and 33.4 ms, so the 1.8 ms available to it is invisible between steps.
+Check for `VSYNC=OFF` and an uncapped frame rate before trusting any subject.
+
+### The test suite needs a C++20 compiler, and this machine does not have one
+
+`tools/test-x86bridge.py` and `tools/test-x86bridge-v2.py` compile real translation units. The
+development machine used for this work had only MinGW.org g++ 6.3, which rejects `-std=c++20`, and
+both scripts pick it up through `shutil.which('g++')` unless `CXX` says otherwise.
+
+The failure is quiet in the worst way. `test-x86bridge.py` prints `PASS static boundaries` first,
+then dies at the `protocol_test.cpp` compile and never reaches the line that invokes the v2 suite.
+A local run therefore looks like it mostly passed while the entire v2 suite -- the overlay syntax
+check and the generic-source rules -- never ran at all. Twice during this work that let something
+reach CI that a local run should have caught.
+
+Treat a compiler failure in these scripts as missing coverage rather than environment noise, and say
+which checks actually ran. Installing a recent g++ or clang and pointing `CXX` at it makes the whole
+suite runnable locally, and is worth doing before the next change to `src/x86bridge/`.
 
 ### Housekeeping
 

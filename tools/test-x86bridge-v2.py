@@ -23,12 +23,16 @@ inline short GetAsyncKeyState(int){return 0;}
 inline uint64_t GetTickCount64(){return 0;}
 struct Ptr{void* Get()const{return nullptr;}};
 struct Guide{Ptr chosen;unsigned width=0,height=0,format=0;bool ready=false;};
-struct Front{std::mutex lock;Guide guideDepth,guideMotion;bool failed=false;}g;
+// async is here because the Timing combo reads the frontend's real flag rather than a shadow
+// field, so this stub has to carry every member the overlay touches on the frontend global.
+struct Front{std::mutex lock;Guide guideDepth,guideMotion;bool failed=false,async=false;}g;
 // Stand-in for neural/hotkey_capture.h, which is Windows-only. The overlay touches two
 // members of it, and this is a syntax check, so those two are what it needs to see.
 namespace hotkey{struct Capture{bool armed=false;void Toggle(){}};}
 struct Controls{x86bridge::WireSettings shadow;x86bridge::WireStatus status;uint64_t overlayAt=0,savedRevision=0;bool synced=false,syncRequested=false,save=false,reload=false,factory=false,measure=false,capturing=false,preSyncEnableChanged=false;hotkey::Capture capture;effect_runtime* runtime=nullptr;}controls;
 void OperationalSettings(){}
+// The Timing combo switches presentation mode live, so the overlay calls into the frontend.
+void SetAsync(bool a){g.async=a;}
 #include "overlay32.inc"
 '''
 with tempfile.TemporaryDirectory(prefix='x86bridge-ui-') as d:
@@ -82,7 +86,16 @@ assert front.count('SyncControls()')==2 # definition + OnPresent call
 assert front.index('if(!SyncControls()')<front.index('Kind::Frame,&f')
 for name in ['Silent Hill','Resident Evil','God of War','GTA V','NFS','ProfileForThisProcess','kTargets']:
  assert name not in ui+front+h,name
-assert 'Async previous-frame presentation is not implemented' in ui
+# The panel must describe what the bridge actually does, and must read the real flag rather than a
+# shadow field that could drift from it. Read-only on purpose: the setting changes what the
+# effect guarantees, so it lives in the ini.
+# The Timing combo reads and writes the frontend's real flag, so the panel cannot drift from what
+# the bridge is doing, and switching is live rather than a restart-only ini edit.
+assert 'int timing=::g.async?1:0;' in ui and '::SetAsync(timing==1);' in ui
+assert ui.index('int timing=')<ui.index('::SetAsync(timing==1);')
+# The panel must not promise smearing the implementation cannot produce: the back buffer is
+# replaced whole, so a pipelined frame is the previous one finished, never a mix of two.
+assert 'It does not smear' in ui and 'smearing when the camera turns' not in ui
 assert 'ImGui::IsItemDeactivated()' in ui and 'editingScaleActive' in ui
 assert 'g.inlineMode.store(true)' in h and 'LoadSettings();ForceInline();' in h
 assert 'register_overlay("DLSS Neural Rendering (AMD)",OnOverlay32)' in front
