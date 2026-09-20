@@ -3320,7 +3320,7 @@ bool CreateTexture(UINT w, UINT h, DXGI_FORMAT f, ComPtr<ID3D12Resource> &out, c
     rd.Format = f;
     rd.SampleDesc.Count = 1;
     rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    if (FAILED(g.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, initialState,
+    if (FAILED(g.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_SHARED, &rd, initialState,
                                                  nullptr, IID_PPV_ARGS(&out))))
     {
         Log("texture creation failed: %s %ux%u format %d", what, w, h, static_cast<int>(f));
