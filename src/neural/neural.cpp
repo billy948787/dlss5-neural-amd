@@ -110,7 +110,7 @@ const Profile &ProfileForThisProcess()
 //
 // So resolve them by hand, and only once something is actually going to be built. On a D3D12
 // target the game has already loaded d3d12.dll and this is just a reference count.
-HMODULE g_d3d12Module = nullptr, g_compilerModule = nullptr;
+HMODULE g_d3d12Module = nullptr, g_privateD3D12CoreModule = nullptr, g_compilerModule = nullptr;
 decltype(&D3D12CreateDevice) p_D3D12CreateDevice = nullptr;
 decltype(&D3D12SerializeRootSignature) p_D3D12SerializeRootSignature = nullptr;
 pD3DCompile p_D3DCompile = nullptr;
@@ -147,6 +147,10 @@ constexpr wchar_t kPrivateD3D12[] = L"dx12p.dll";
 static_assert(sizeof(kPrivateD3D12) == sizeof(L"d3d12.dll"));
 constexpr char kSystemD3D12Ansi[] = "d3d12.dll";
 constexpr char kPrivateD3D12Ansi[] = "dx12p.dll";
+constexpr wchar_t kPrivateD3D12Core[] = L"dx12pcore.dll";
+constexpr char kSystemD3D12CoreAnsi[] = "d3d12core.dll";
+constexpr char kPrivateD3D12CoreAnsi[] = "dx12pcore.dll";
+static_assert(sizeof(kPrivateD3D12CoreAnsi) == sizeof(kSystemD3D12CoreAnsi));
 
 // Null unless D3D12 had to be brought in privately. On a game already using D3D12 there is
 // nothing to avoid and everything below is skipped.
@@ -154,13 +158,30 @@ const wchar_t *g_privateD3D12 = nullptr;
 
 HMODULE LoadPrivateD3D12()
 {
-    // A game already on D3D12 needs none of this: its d3d12.dll was loaded and hooked long before
-    // the add-on existed, and reusing the handle changes nothing.
-    if (HMODULE already = GetModuleHandleW(L"d3d12.dll"); already != nullptr)
-        return already;
+    auto environmentPath = [](const wchar_t *name) {
+        const DWORD needed = GetEnvironmentVariableW(name, nullptr, 0);
+        if (needed == 0)
+            return std::filesystem::path {};
+        std::wstring value(needed, L'\0');
+        const DWORD written = GetEnvironmentVariableW(name, value.data(), needed);
+        if (written == 0 || written >= needed)
+            return std::filesystem::path {};
+        value.resize(written);
+        return std::filesystem::path(value);
+    };
+    const auto selectedD3D12 = environmentPath(L"DLSS5_PRIVATE_D3D12");
+    const auto selectedCore = environmentPath(L"DLSS5_PRIVATE_D3D12CORE");
+    const bool selectedPair = !selectedD3D12.empty() && !selectedCore.empty();
+
+    // A game already on D3D12 needs none of this unless a private implementation was explicitly
+    // selected. D3D11 games can still have the system D3D12 loaded early by an unrelated helper
+    // such as DirectStorage; that must not defeat the opt-in private device.
+    if (!selectedPair)
+        if (HMODULE already = GetModuleHandleW(L"d3d12.dll"); already != nullptr)
+            return already;
 
     wchar_t system32[MAX_PATH] {};
-    if (GetSystemDirectoryW(system32, MAX_PATH) == 0)
+    if (!selectedPair && GetSystemDirectoryW(system32, MAX_PATH) == 0)
         return LoadLibraryW(L"d3d12.dll");
     const std::filesystem::path sys = system32;
     const std::filesystem::path dir = ExeDirectory() / L"dlss5-runtime";
@@ -168,42 +189,111 @@ HMODULE LoadPrivateD3D12()
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     std::filesystem::create_directories(dir / L"D3D12", ec);
-    auto place = [&](const wchar_t *from, const std::filesystem::path &to) {
+    auto place = [&](const std::filesystem::path &source, const std::filesystem::path &to,
+                     bool alwaysReplace) {
         std::error_code e;
-        const auto source = sys / from;
         // Same size means a copy from an earlier run is still current. It may also be mapped by
         // this very process already, which would make overwriting it fail for no good reason.
-        if (std::filesystem::exists(to, e) &&
+        if (!alwaysReplace && std::filesystem::exists(to, e) &&
             std::filesystem::file_size(to, e) == std::filesystem::file_size(source, e))
             return true;
         std::filesystem::copy_file(source, to, std::filesystem::copy_options::overwrite_existing, e);
-        return std::filesystem::exists(to);
+        return !e && std::filesystem::exists(to);
     };
 
     // D3D12.dll will not come up without its core component -- D3D12_ERROR_INVALID_REDIST,
     // 0x887E0003, measured -- and a copy loaded from outside the system directory looks for that
     // core beside itself, or in a D3D12 subdirectory, rather than back in System32. Provide both,
     // and load with LOAD_WITH_ALTERED_SEARCH_PATH so its own directory is searched first.
-    if (!place(L"D3D12.dll", dir / kPrivateD3D12) ||
-        !place(L"D3D12Core.dll", dir / L"D3D12Core.dll"))
+    const auto d3d12Source = selectedPair ? selectedD3D12 : sys / L"D3D12.dll";
+    const auto coreSource = selectedPair ? selectedCore : sys / L"D3D12Core.dll";
+    if (!place(d3d12Source, dir / kPrivateD3D12, selectedPair) ||
+        !place(coreSource, dir / L"D3D12Core.dll", selectedPair) ||
+        !place(coreSource, dir / L"D3D12" / L"D3D12Core.dll", selectedPair) ||
+        (selectedPair && !place(coreSource, dir / kPrivateD3D12Core, true)))
     {
+        if (selectedPair)
+        {
+            Log("could not place the D3D12 pair selected by DLSS5_PRIVATE_D3D12 and "
+                "DLSS5_PRIVATE_D3D12CORE; refusing to load a different D3D12 implementation.");
+            return nullptr;
+        }
         Log("could not place a private copy of D3D12; falling back to the system one, which will "
             "upset a D3D11 game's next resize.");
         return LoadLibraryW(L"d3d12.dll");
     }
-    place(L"D3D12Core.dll", dir / L"D3D12" / L"D3D12Core.dll");
+
+    if (selectedPair)
+    {
+        // vkd3d's frontend opens "d3d12core.dll" by base name. LOAD_WITH_ALTERED_SEARCH_PATH
+        // does not affect that later explicit LoadLibrary call, and Wine resolves it to System32
+        // when the game's unrelated DirectStorage frontend is already resident. Give this
+        // frontend/core pair a private, same-length core name so only our device can bind it.
+        auto rewriteCoreName = [](const std::filesystem::path &file) {
+            std::ifstream input(file, std::ios::binary);
+            std::vector<char> bytes((std::istreambuf_iterator<char>(input)), {});
+            input.close();
+            size_t rewritten = 0;
+            for (auto at = bytes.begin();
+                 (at = std::search(at, bytes.end(), std::begin(kSystemD3D12CoreAnsi),
+                                   std::end(kSystemD3D12CoreAnsi) - 1)) != bytes.end();)
+            {
+                std::copy(std::begin(kPrivateD3D12CoreAnsi),
+                          std::end(kPrivateD3D12CoreAnsi) - 1, at);
+                at += sizeof(kPrivateD3D12CoreAnsi) - 1;
+                ++rewritten;
+            }
+            std::ofstream output(file, std::ios::binary | std::ios::trunc);
+            if (bytes.empty() || rewritten == 0 || !output ||
+                !output.write(bytes.data(), static_cast<std::streamsize>(bytes.size())))
+                return size_t { 0 };
+            return rewritten;
+        };
+        const size_t frontendRewrites = rewriteCoreName(dir / kPrivateD3D12);
+        const size_t coreRewrites = rewriteCoreName(dir / kPrivateD3D12Core);
+        if (frontendRewrites == 0 || coreRewrites == 0)
+        {
+            Log("could not isolate the environment-selected D3D12Core name; refusing to load "
+                "a mixed D3D12 pair.");
+            return nullptr;
+        }
+        Log("private D3D12 core name rewritten from %s to %s (frontend %zu, core %zu "
+            "occurrence(s)).", kSystemD3D12CoreAnsi, kPrivateD3D12CoreAnsi, frontendRewrites,
+            coreRewrites);
+    }
 
     HMODULE loaded = LoadLibraryExW((dir / kPrivateD3D12).c_str(), nullptr,
                                     LOAD_WITH_ALTERED_SEARCH_PATH);
     if (loaded == nullptr)
     {
+        if (selectedPair)
+        {
+            Log("the environment-selected private D3D12 pair would not load (%lu); refusing to "
+                "load a different D3D12 implementation.", GetLastError());
+            return nullptr;
+        }
         Log("the private D3D12 copy would not load (%lu); falling back to the system one.",
             GetLastError());
         return LoadLibraryW(L"d3d12.dll");
     }
+    if (selectedPair)
+    {
+        // The frontend opens its core lazily by base name, after this altered-search-path load is
+        // over. Pin the unique private core by full path first so that lookup cannot fall through
+        // to System32 when D3D12CreateDevice is called later.
+        g_privateD3D12CoreModule = LoadLibraryExW((dir / kPrivateD3D12Core).c_str(), nullptr,
+                                                  LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (g_privateD3D12CoreModule == nullptr)
+        {
+            Log("the environment-selected private D3D12Core would not load (%lu); refusing to "
+                "load a mixed D3D12 pair.", GetLastError());
+            FreeLibrary(loaded);
+            return nullptr;
+        }
+    }
     g_privateD3D12 = kPrivateD3D12;
-    Log("D3D12 loaded privately as %ls, so ReShade installs no d3d12 hooks over the live "
-        "swapchain.", kPrivateD3D12);
+    Log("D3D12 loaded privately as %ls%s, so ReShade installs no d3d12 hooks over the live "
+        "swapchain.", kPrivateD3D12, selectedPair ? " from the environment-selected pair" : "");
     return loaded;
 }
 
@@ -3330,14 +3420,6 @@ bool CreateTexture(UINT w, UINT h, DXGI_FORMAT f, ComPtr<ID3D12Resource> &out, c
         return false;
     }
 
-    HANDLE sharedProbe = nullptr;
-    const HRESULT sharedHr =
-        g.device->CreateSharedHandle(out.Get(), nullptr, GENERIC_ALL, nullptr, &sharedProbe);
-
-    Log("linux shared probe: %s resource=%p hr=0x%08lX handle=%p",
-        what, out.Get(), static_cast<unsigned long>(sharedHr), sharedProbe);
-
-    // Diagnostic run only. Deliberately keep the handle alive for this process.
     return true;
 }
 
