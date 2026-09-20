@@ -3320,12 +3320,24 @@ bool CreateTexture(UINT w, UINT h, DXGI_FORMAT f, ComPtr<ID3D12Resource> &out, c
     rd.Format = f;
     rd.SampleDesc.Count = 1;
     rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    if (FAILED(g.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_SHARED, &rd, initialState,
-                                                 nullptr, IID_PPV_ARGS(&out))))
+    const HRESULT createHr =
+        g.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_SHARED, &rd, initialState,
+                                          nullptr, IID_PPV_ARGS(&out));
+    if (FAILED(createHr))
     {
-        Log("texture creation failed: %s %ux%u format %d", what, w, h, static_cast<int>(f));
+        Log("texture creation failed: %s %ux%u format %d hr=0x%08lX",
+            what, w, h, static_cast<int>(f), static_cast<unsigned long>(createHr));
         return false;
     }
+
+    HANDLE sharedProbe = nullptr;
+    const HRESULT sharedHr =
+        g.device->CreateSharedHandle(out.Get(), nullptr, GENERIC_ALL, nullptr, &sharedProbe);
+
+    Log("linux shared probe: %s resource=%p hr=0x%08lX handle=%p",
+        what, out.Get(), static_cast<unsigned long>(sharedHr), sharedProbe);
+
+    // Diagnostic run only. Deliberately keep the handle alive for this process.
     return true;
 }
 
