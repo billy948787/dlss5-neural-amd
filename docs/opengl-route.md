@@ -5,8 +5,10 @@
 > OpenGL game (Luanti 5.17.0, Minetest Game, AMD RX 9070 XT, Adrenalin 26.8.1). It hands over
 > between the two APIs on the GPU with imported D3D12 fences, it copes with a multisampled default
 > framebuffer, and resize has been exercised with the effect on. It still carries no guides.
-> Nothing here is packaged or installable yet; the README still says OpenGL is not supported, and
-> until the items under [What is not done](#what-is-not-done) are closed, it is right.
+>
+> **Shipped in v0.6.0**, and installable: the installer detects a 64-bit OpenGL game, routes it and
+> puts ReShade in as `opengl32.dll`. A 32-bit OpenGL game still has no route. What is left is under
+> [What is not done](#what-is-not-done).
 
 Everything below was measured on this machine rather than reasoned about. Where a number appears,
 it came out of a run; where a rule appears, it cost something to learn.
@@ -296,6 +298,19 @@ measure, residual detail: ratio 0.193                 (the correction follows th
 network at half resolution plus two CPU stalls per frame — which is exactly what the semaphore
 handover is for.
 
+## How it shipped
+
+Released as add-on **v0.6.0** (`dlss5-neural.addon64`, `c037a69f…`), with the payload the
+installer reads pinned to those bytes, and installer **v0.2.0** carrying the detection and the
+`opengl32.dll` proxy. The installer's own self-update was exercised end to end by the user after
+publication and worked.
+
+Two things went wrong on the way out, both recorded in the installer's handoff for the same date:
+the two copies of `payload.json` had drifted, and publishing from the stale one pushed bridge
+hashes live that did not match the published files -- caught by the manifest verification pass,
+which had never been reaching the end because the publish script died on a line `hf` writes to
+stderr. Both are fixed; the verification now passes on all nine files.
+
 ## Reproducing it
 
 Paths below are placeholders; nothing in this document needs the game to live anywhere in
@@ -375,8 +390,11 @@ In the order the value falls out:
 3. **Start-up cost under SDL.** `DllMain` runs seven times in an SDL host. Nothing there is
    expensive enough to have shown up yet, but the log truncation is already visible and the
    engine bring-up would not survive the same treatment gracefully.
-4. **Packaging.** The README says OpenGL is not supported; the installer has no OpenGL renderer
-   detection and would need to place `opengl32.dll` rather than a DXGI proxy.
+4. **CI and a contract test.** `.github/workflows/build.yml` builds `neural`, `probe`, `session`
+   and `framecheck`; `glinfo` and `glprobe` are not in it. Worth more than either: a test that
+   asserts the add-on does **not** statically import `opengl32.dll`. That import is the trap the
+   NFS 2015 comment in `neural.cpp` documents, and this route resolves the DLL by hand to avoid
+   it -- a careless `#pragma comment(lib, "opengl32")` would undo that silently.
 5. **A second host.** Everything here is one game on one driver. Xonotic (DarkPlaces, 64-bit, free)
    is the obvious next one, and a 3.3 core host would exercise the non-DSA path in anger.
 
