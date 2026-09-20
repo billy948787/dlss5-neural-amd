@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.6.0 - 2026-09-19 - OpenGL
+
+Same pinned **DLSS-NR-on-AMD v0.3.0** runtime and the same weights, so an upgrade is the add-on
+and nothing else.
+
+- **An OpenGL route.** The network runs where it always runs -- on this add-on's own private D3D12
+  device -- and the frame crosses to it the way the Vulkan route's does: the shared textures are
+  created on our device, exported as NT handles and imported into the host, here through
+  `GL_EXT_memory_object_win32`. What is different is the host's half, and all of it follows from
+  one measurement: ReShade hands an OpenGL add-on the **default framebuffer**, not a texture, so
+  every copy in the route is a `glBlitFramebuffer` rather than a resource copy, Y is inverted on
+  the way in and back on the way out, and the route puts back every piece of context state it
+  touches. Validated end to end on Luanti 5.17.0 with the network running: colour and estimated
+  motion, no depth, same as Vulkan.
+- **The hand-over runs on the GPU.** The imported D3D12 fences are used as GL semaphores, which
+  makes this the only route in the project that does not stall the CPU twice a frame -- worth
+  about 13% here against the same run with `GlSemaphores=0`, which forces the old behaviour.
+  The first frame is still confirmed on the CPU before the stall is dropped: a fence wait that
+  never completes is a hung queue and a game that has to be killed, not a log line.
+- **Every frame that reaches the screen has been through the network.** When the previous
+  evaluation has not finished the route waits for it rather than letting the frame past
+  uncorrected, because alternating between a corrected frame and an uncorrected one at a hundred
+  and eighty a second is a strobe. `GlHoldFrames=N` repeats the last result instead, which raises
+  the present rate and fills it with duplicates -- off by default, since a duplicated frame makes
+  every frame counter in the system report a rate nobody is seeing.
+- **A multisampled default framebuffer is resolved on the way in**, read from `GL_SAMPLES` rather
+  than from the back buffer's description.
+- **Two rules this driver adds, both paid for.** An imported texture's shared handle is not the
+  application's to close, whatever the extension says -- closing it faults inside the ICD from a
+  driver thread, measured at 3 runs in 8 -- so the route keeps them for the life of the process.
+  And `GL_HANDLE_TYPE_OPAQUE_WIN32_EXT` is *accepted* for a D3D12 resource handle and is wrong, so
+  the route names `D3D12_RESOURCE` and stands down rather than falling back to something that
+  appears to work.
+- **Re-entrancy, which used to close the game.** In OpenGL the route's own calls go through the
+  same ReShade hooks the game's do, so its `glBindFramebuffer` came back as a render-target bind on
+  the present thread, inside a lock this add-on already held -- and a second `std::mutex` lock on
+  one thread throws under MSVC rather than deadlocking. The observers now ignore what the add-on
+  issued itself, which they should have done anyway: the route's binds are not the game drawing.
+- Two new diagnostics, neither needing a game: **`glprobe`** answers whether this driver will let
+  OpenGL import D3D12 memory and fences at all, and **`glinfo`** reports what ReShade hands an
+  add-on inside a real OpenGL host. `docs/opengl-route.md` is the whole of what was measured.
+
+Not in this release: depth or motion from the game on OpenGL (the depth is reachable as a texture
+and needs a shader pass to become usable), and any route at all for a 32-bit OpenGL game -- the
+32-bit pair covers D3D8, D3D9 and D3D11.
+
 ## v0.5.2 - 2026-09-15 - The overlay saves itself
 
 Same pinned **DLSS-NR-on-AMD v0.3.0** runtime and the same weights as v0.5.1, so an upgrade is the

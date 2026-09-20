@@ -16,7 +16,7 @@ Discord: <https://discord.gg/wYhvS3JSHM> - for DLSS 5 in general, not a support 
 | | |
 |---|---|
 | GPU | AMD RDNA3 or RDNA4 with the HIP 7 runtime (`amdhip64_7.dll`). HIP 6 does not work. A current Adrenalin driver includes it. Does nothing on NVIDIA or Intel. |
-| Renderer | Direct3D 11 works best. Direct3D 12 works but gets less information. Vulkan is experimental. 32-bit games are experimental. OpenGL is not supported. |
+| Renderer | Direct3D 11 works best. Direct3D 12 works but gets less information. Vulkan and OpenGL are experimental. 32-bit games are experimental, and 32-bit OpenGL is not supported at all. |
 | ReShade | The build labelled "with full add-on support", version 6.x. The normal build cannot load add-ons. |
 | Disk | About 150 MB for the network weights. |
 
@@ -88,7 +88,7 @@ Each control carries a tag saying how well it is understood: `MEASURED`, `TRACED
 | What you see | What it means |
 |---|---|
 | The add-on is not in the Add-ons tab | `ReShade.ini` has `DisabledAddons=` listing it under `[ADDON]`. ReShade writes that line if you ever untick the add-on. Delete the line. |
-| The status says the API is wrong | Only D3D11, D3D12 and Vulkan are supported. Check for a per-game renderer override. |
+| The status says the API is wrong | Only D3D11, D3D12, Vulkan and OpenGL are supported. Check for a per-game renderer override. |
 | `HIP: amdhip64_7.dll failed to load` | HIP 7 is not installed. HIP 6 does not count. |
 | `hash mismatch; refused` | The wrong `dlssnr_amd_pass1.dll`. Compare with `tools/SHA256SUMS.txt`. |
 | `missing:` followed by a file path | That file is not where the add-on looks. Put it at exactly that path. |

@@ -7,3 +7,11 @@
 #ifndef DLSS5_WITH_VULKAN
 #define DLSS5_WITH_VULKAN 1
 #endif
+
+// The OpenGL transport, on the same terms. It costs even less than the Vulkan one in a process
+// that is not an OpenGL host: there is no device to hook and no import to patch, because in
+// OpenGL nothing has to be arranged before the context exists. The route resolves opengl32.dll by
+// hand at the first present and does nothing at all until one arrives from a GL device.
+#ifndef DLSS5_WITH_OPENGL
+#define DLSS5_WITH_OPENGL 1
+#endif

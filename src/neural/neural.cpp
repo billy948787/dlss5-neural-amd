@@ -1319,6 +1319,18 @@ struct State
     // only way to tell a back-buffer reference apart from anything else the add-on does to the
     // device. Picture is untouched with this on; it is not a usable mode.
     std::atomic<bool> noBackBuffer { false };
+    // OpenGL only, and read-only from the ini like the rest of that family. The route hands over
+    // between the two APIs with the imported D3D12 fences when the driver has them; setting this
+    // to 0 puts it back on the CPU stall the other routes use, which is the only way to compare
+    // the two on one machine and the first thing to try if a GL host misbehaves.
+    std::atomic<bool> glSemaphores { true };
+    // OpenGL only. How many frames in a row may repeat the last result when the game presents
+    // faster than the network answers. Zero -- the default -- means never: the route waits for
+    // the network instead, so every frame that reaches the screen is a new one and the frame
+    // counter the player sees counts frames they can actually see. Above zero trades that for a
+    // higher present rate made partly of duplicates, which is a real choice on a
+    // variable-refresh display and a misleading number everywhere else.
+    std::atomic<int> glHoldFrames { 0 };
     // Diagnostic. Loads and observes but never stands the bridge up: no second D3D12 device, no
     // runtime, no shared textures. Does nothing to the picture; it exists to tell "the add-on
     // being attached at all" apart from "what the bridge does to the game's device".
@@ -1593,6 +1605,8 @@ void LoadSettings()
     g.useGameGuides.store(flag(L"GameGuides", g.useGameGuides.load()));
     g.noBackBuffer.store(flag(L"NoBackBuffer", g.noBackBuffer.load()));
     g.noBridge.store(flag(L"NoBridge", g.noBridge.load()));
+    g.glSemaphores.store(flag(L"GlSemaphores", g.glSemaphores.load()));
+    g.glHoldFrames.store(std::clamp(static_cast<int>(num(L"GlHoldFrames", 0.0f)), 0, 8));
     g.stage.store(static_cast<int>(num(L"Stage", 3.0f)));
     g.events = static_cast<int>(num(L"Events", 31.0f));
     // Diagnostic, in the same family as Stage / Events / NoBridge: read at load, never written
@@ -3607,9 +3621,35 @@ void ObserveD3D11(device *dev, const resource_view *rtvs, uint32_t count, resour
     }
 }
 
+// True on a thread while this add-on is issuing commands into the host's API on its own account.
+//
+// On D3D11 and D3D12 that distinction never mattered: the bridge records into its own command
+// list on its own device, and ReShade has nothing to say about it. In OpenGL there is no such
+// separation. Every call the route makes goes through the same hooked entry points the game uses,
+// so ReShade reports the route's own glBindFramebuffer back to this add-on as a render-target
+// bind -- on the present thread, inside OnPresent, which already holds g.lock. The second lock on
+// a std::mutex from the same thread does not deadlock under MSVC: it throws std::system_error,
+// which is unhandled, which closes the game. That is exactly how the OpenGL route's first run
+// ended, with the log stopping mid-way through building the crossing and an E06D7363 in
+// KERNELBASE to show for it.
+//
+// So the observers ignore what this add-on did itself. They would be wrong to count it in any
+// case: the route's binds are not the game drawing its frame.
+thread_local bool g_selfIssued = false;
+
+struct SelfIssued
+{
+    SelfIssued() { g_selfIssued = true; }
+    ~SelfIssued() { g_selfIssued = false; }
+    SelfIssued(const SelfIssued &) = delete;
+    SelfIssued &operator=(const SelfIssued &) = delete;
+};
+
 void OnBindDepthStencil(command_list *cmd_list, uint32_t count, const resource_view *rtvs,
                         resource_view dsv)
 {
+    if (g_selfIssued)
+        return;
     device *dev = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
     if (dev == nullptr)
         return;
@@ -3644,6 +3684,7 @@ void OnBindDepthStencil(command_list *cmd_list, uint32_t count, const resource_v
             const char *api = dev->get_api() == device_api::d3d12   ? "D3D12"
                               : dev->get_api() == device_api::d3d11 ? "D3D11"
                               : dev->get_api() == device_api::vulkan ? "Vulkan"
+                              : dev->get_api() == device_api::opengl ? "OpenGL"
                                                                      : "other API";
             Log("depth seen (%s): %ux%u format %u samples %u", api,
                 rd.texture.width, rd.texture.height, static_cast<unsigned>(rd.texture.format),
@@ -3690,7 +3731,7 @@ bool OnDrawIndexed(command_list *, uint32_t, uint32_t, uint32_t, int32_t, uint32
 bool OnClearDepth(command_list *cmd_list, resource_view dsv, const float *, const uint8_t *,
                   uint32_t, const rect *)
 {
-    if (cmd_list == nullptr || dsv.handle == 0)
+    if (g_selfIssued || cmd_list == nullptr || dsv.handle == 0)
         return false;
     device *dev = cmd_list->get_device();
     if (dev == nullptr || dev->get_api() != device_api::d3d12)
@@ -3783,10 +3824,19 @@ bool OnClearDepth(command_list *cmd_list, resource_view dsv, const float *, cons
 #if DLSS5_WITH_VULKAN
 namespace vkroute { void ReleaseSwapchainSized(); }
 #endif
+#if DLSS5_WITH_OPENGL
+namespace glroute { void ReleaseSwapchainSized(); }
+#endif
 
 void ReleaseSwapchainSized()
 {
     WaitForWorkQueue(g.completion);
+#if DLSS5_WITH_OPENGL
+    // The imported GL textures and their FBOs have the same lifetime as the D3D12 resources
+    // below. Unlike the Vulkan route this one may be called with no GL context on the thread --
+    // a swapchain can be destroyed from anywhere -- and it checks for that itself.
+    glroute::ReleaseSwapchainSized();
+#endif
 #if DLSS5_WITH_VULKAN
     // The imported VkImages have the same lifetime as the D3D12 resources below. Invalidate the
     // route even when the replacement swapchain keeps the same size and format, otherwise its
@@ -4795,6 +4845,9 @@ bool BringUpEngines(UINT &)
 #if DLSS5_WITH_VULKAN
 #include "vk_route.inc"
 #endif
+#if DLSS5_WITH_OPENGL
+#include "gl_route.inc"
+#endif
 
 // Which D3D12 buffer is the scene depth, decided once per present.
 //
@@ -4993,6 +5046,26 @@ void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, 
     }
 #endif
 
+#if DLSS5_WITH_OPENGL
+    // OpenGL. Same answer again -- our own D3D12 device, shared textures imported into the host --
+    // with the crossing rebuilt around a framebuffer blit, because ReShade hands an OpenGL add-on
+    // the default framebuffer rather than a texture and there is nothing to copy. See
+    // gl_route.inc.
+    if (dev->get_api() == device_api::opengl)
+    {
+        if (g.noBridge.load() || g.goneSwapchain.load() == sc)
+            return;
+        if (!LoadGraphicsApi())
+        {
+            g.unavailable = true;
+            g.reason = "the D3D12 or DXGI entry points could not be resolved";
+            return;
+        }
+        glroute::Present(queue, sc);
+        return;
+    }
+#endif
+
     if (dev->get_api() == device_api::d3d11)
     {
         // Between a teardown and the new swapchain being announced there is nothing safe to
@@ -5066,8 +5139,9 @@ void OnPresent(command_queue *queue, swapchain *sc, const rect *, const rect *, 
         if (!g.loggedWrongApi)
         {
             g.loggedWrongApi = true;
-            Log("unsupported graphics API %u; Vulkan transport in this build: %d",
-                static_cast<unsigned>(dev->get_api()), DLSS5_WITH_VULKAN);
+            Log("unsupported graphics API %u; transports compiled into this build: Vulkan %d, "
+                "OpenGL %d", static_cast<unsigned>(dev->get_api()), DLSS5_WITH_VULKAN,
+                DLSS5_WITH_OPENGL);
         }
         return;
     }
@@ -6643,7 +6717,10 @@ extern "C" __declspec(dllexport) const char *NAME = "dlss5 neural";
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
     "Runs DLSS-NR on AMD with HIP 7. D3D11/D3D12"
 #if DLSS5_WITH_VULKAN
-    " and experimental Vulkan"
+    ", experimental Vulkan"
+#endif
+#if DLSS5_WITH_OPENGL
+    ", experimental OpenGL"
 #endif
     ". SDR and serialized inline multipass preview.";
 
@@ -6658,8 +6735,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
             const auto log = ExeDirectory() / L"dlss5-neural.log";
             g_log = _wfopen(log.c_str(), L"w");
             Log("dlss5 neural: %s", ProfileForThisProcess().note);
-            Log("preview 2026-09-10: SDR input contract, serialized inline passes; Vulkan %d",
-                DLSS5_WITH_VULKAN);
+            Log("preview 2026-09-10: SDR input contract, serialized inline passes; Vulkan %d, "
+                "OpenGL %d", DLSS5_WITH_VULKAN, DLSS5_WITH_OPENGL);
             // Before the read, so a first run has a documented file to read and the user has
             // something to edit without being told which keys exist. On the run that writes it,
             // it has already read the settings for the reason its own comment gives, and a second
